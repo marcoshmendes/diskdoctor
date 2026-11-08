@@ -20,6 +20,7 @@ Formato: [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/). Datas no f
   veredito considera só os eventos posteriores, e o crescimento SMART é medido a partir dela.
 - Barra de uso por volume em `list` e no painel.
 - CI (clippy + testes) e release automatizado no GitHub Actions (`.zip` + SHA-256).
+- Publicado em <https://github.com/marcoshmendes/diskdoctor> sob a licença **MIT**.
 
 ### Alterado
 - Ctrl+C: fora de um teste encerra restaurando o terminal; durante um teste cancela com segurança

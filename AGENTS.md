@@ -37,15 +37,25 @@ cargo clippy --all-targets      # deve ficar sem avisos
   parsers usam fixtures em `tests/fixtures/`.
 - `cargo test --test capacity_win -- --ignored` exercita o caminho nativo do teste de capacidade
   com ~64 MiB de arquivos numa pasta temporária (ignorado por padrão).
-- CI: `.github/workflows/ci.yml` (clippy `-D warnings` + testes em `windows-latest`).
-  Release: `git tag vX.Y.Z && git push origin vX.Y.Z` → `release.yml` compila no GitHub e publica
-  `diskdoctor-vX.Y.Z-windows-x64.zip` + `.sha256`. Não publique binários compilados localmente:
-  eles carregam caminhos da máquina (ex.: `C:\Users\<nome>\.cargo\...`).
 - A lógica compila e testa em qualquer SO. O código Win32 fica atrás de `#[cfg(windows)]`
   e tem stubs em `platform/unsupported.rs`.
 - Para executar sem poluir os dados do usuário, use `DISKDOCTOR_DATA_DIR=<pasta temporária>`.
 - `scan` e `benchmark` exigem terminal de Administrador. `list` e `events` funcionam sem
   elevação; `health` funciona sem elevação, mas com SMART parcial.
+
+## Repositório, commits e releases
+
+- Repositório público: <https://github.com/marcoshmendes/diskdoctor> (licença MIT, `LICENSE`).
+- Commits usam o e-mail **noreply** do GitHub, configurado só neste repositório
+  (`git config user.email "<id>+<login>@users.noreply.github.com"`). Nunca use o e-mail pessoal.
+- CI: `.github/workflows/ci.yml` (clippy `-D warnings` + testes em `windows-latest`) a cada push
+  na `main` e em pull requests.
+- Release: atualize `version` no `Cargo.toml` e o `CHANGELOG.md`, faça o commit e depois
+  `git tag -a vX.Y.Z -m "diskdoctor X.Y.Z" && git push origin vX.Y.Z`. O `release.yml` roda os
+  testes, compila no GitHub e publica `diskdoctor-vX.Y.Z-windows-x64.zip` + `.sha256` em Releases.
+- Não publique binários compilados localmente: eles carregam caminhos da máquina
+  (ex.: `C:\Users\<nome>\.cargo\...`).
+- Se o `git push` pedir usuário/senha, rode `gh auth setup-git` (usa o login do GitHub CLI).
 
 ## Mapa do código
 
