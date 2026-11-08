@@ -1,0 +1,14 @@
+/target
+
+# Relatórios e resultados gerados localmente: contêm dados da máquina de quem rodou.
+diskdoctor-relatorio-*
+scan-*.json
+bench*.json
+*.ddcap
+/diskdoctor-data/
+
+# Configurações locais de editores e agentes
+.claude/settings.local.json
+.vscode/
+.idea/
+*.swp

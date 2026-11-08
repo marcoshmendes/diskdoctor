@@ -1,0 +1,209 @@
+[
+  {
+    "TimeUtc": "2026-11-08T17:59:47.6191003Z",
+    "Provider": "disk",
+    "Id": 153,
+    "Level": 3,
+    "RecordId": 12700,
+    "Properties": [
+      "\\Device\\Harddisk2\\DR2",
+      "0x3af1e18",
+      "2",
+      "\\Device\\00000035",
+      "15 1 4 0 4 0 44 0 0 0 0 0 153 0 4 128 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4 42"
+    ],
+    "Message": "A operação de ES no endereço de bloco lógico 0x3af1e18 para o Disco 2 (nome PDO: \\Device\\00000035) foi repetida."
+  },
+  {
+    "TimeUtc": "2026-11-08T17:59:31.8875598Z",
+    "Provider": "disk",
+    "Id": 153,
+    "Level": 3,
+    "RecordId": 12699,
+    "Properties": [
+      "\\Device\\Harddisk2\\DR2",
+      "0x86f030",
+      "2",
+      "\\Device\\00000035",
+      "15 1 4 0 4 0 44 0 0 0 0 0 153 0 4 128 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4 42"
+    ],
+    "Message": "A operação de ES no endereço de bloco lógico 0x86f030 para o Disco 2 (nome PDO: \\Device\\00000035) foi repetida."
+  },
+  {
+    "TimeUtc": "2026-11-08T17:58:33.1883243Z",
+    "Provider": "disk",
+    "Id": 153,
+    "Level": 3,
+    "RecordId": 12684,
+    "Properties": [
+      "\\Device\\Harddisk2\\DR2",
+      "0x57a2710",
+      "2",
+      "\\Device\\00000035",
+      "15 1 4 0 4 0 44 0 0 0 0 0 153 0 4 128 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4 42"
+    ],
+    "Message": "A operação de ES no endereço de bloco lógico 0x57a2710 para o Disco 2 (nome PDO: \\Device\\00000035) foi repetida."
+  },
+  {
+    "TimeUtc": "2026-11-08T17:41:49.2797272Z",
+    "Provider": "disk",
+    "Id": 153,
+    "Level": 3,
+    "RecordId": 12621,
+    "Properties": [
+      "\\Device\\Harddisk2\\DR2",
+      "0xd141c0",
+      "2",
+      "\\Device\\00000035",
+      "15 1 4 0 4 0 44 0 0 0 0 0 153 0 4 128 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4 42"
+    ],
+    "Message": "A operação de ES no endereço de bloco lógico 0xd141c0 para o Disco 2 (nome PDO: \\Device\\00000035) foi repetida."
+  },
+  {
+    "TimeUtc": "2026-11-08T18:01:55.7259557Z",
+    "Provider": "Microsoft-Windows-Hyper-V-Hypervisor",
+    "Id": 129,
+    "Level": 4,
+    "RecordId": 12721,
+    "Properties": [
+      "True",
+      "True",
+      "0",
+      "67",
+      "0",
+      "0",
+      "0"
+    ],
+    "Message": "O hipervisor inicializou o remapeamento de E/S.\r\n\r\nHardware presente: true\r\nHardware habilitado: true\r\nPolítica: 0x0\r\nRecursos habilitados: 0x43\r\nInformações internas: 0x0\r\nProblemas: 0x0\r\nInformações adicionais: 0x0"
+  },
+  {
+    "TimeUtc": "2026-11-08T18:01:55.7224899Z",
+    "Provider": "Microsoft-Windows-Kernel-Boot",
+    "Id": 153,
+    "Level": 4,
+    "RecordId": 12708,
+    "Properties": [
+      "0",
+      "100",
+      "643"
+    ],
+    "Message": "A segurança baseada em virtualização (políticas: VBS Enabled,VSM Required,Hvci,Boot Chain Signer Soft Enforced) está enabled due to VBS registry configuration."
+  },
+  {
+    "TimeUtc": "2026-11-08T18:02:01.9178194Z",
+    "Provider": "Microsoft-Windows-Kernel-Processor-Power",
+    "Id": 55,
+    "Level": 4,
+    "RecordId": 12750,
+    "Properties": [
+      "0",
+      "7",
+      "3",
+      "1",
+      "3401",
+      "100",
+      "47",
+      "47",
+      "1"
+    ],
+    "Message": "O processador 7 no grupo 0 expõe os seguintes recursos de gerenciamento de energia:\r\n\r\nTipo de estado ocioso: ACPI Idle (C) States (3 estado(s))\r\n\r\nTipo de estado de desempenho: ACPI Performance (P) / Throttle (T) States\r\nFrequência Nominal (MHz): 3401\r\nPercentual de desempenho máximo: 100\r\nPercentual de desempenho mínimo: 47\r\nPercentual de aceleração mínimo: 47"
+  },
+  {
+    "TimeUtc": "2026-11-08T18:02:04.4832489Z",
+    "Provider": "Microsoft-Windows-Ntfs",
+    "Id": 98,
+    "Level": 2,
+    "RecordId": 12753,
+    "Properties": [
+      "\\\\?\\Volume{00000000-0000-4000-8000-000000000104}",
+      "\\Device\\HarddiskVolume5",
+      "3"
+    ],
+    "Message": "Volume \\\\?\\Volume{00000000-0000-4000-8000-000000000104} (\\Device\\HarddiskVolume5) precisa ser colocado offline para executar um Chkdsk Completo. Execute \"CHKDSK /F\" localmente via linha de comando ou execute \"REPAIR-VOLUME <unidade:>\" local ou remotamente via PowerShell."
+  },
+  {
+    "TimeUtc": "2026-11-08T18:02:01.2899760Z",
+    "Provider": "Microsoft-Windows-Ntfs",
+    "Id": 98,
+    "Level": 4,
+    "RecordId": 12742,
+    "Properties": [
+      "\\\\?\\Volume{00000000-0000-4000-8000-000000000204}",
+      "\\Device\\HarddiskVolume9",
+      "0"
+    ],
+    "Message": "Volume \\\\?\\Volume{00000000-0000-4000-8000-000000000204} (\\Device\\HarddiskVolume9) está íntegro. Nenhuma ação é necessária."
+  },
+  {
+    "TimeUtc": "2026-11-08T18:02:04.4832458Z",
+    "Provider": "Microsoft-Windows-Ntfs",
+    "Id": 7,
+    "Level": 3,
+    "RecordId": 12752,
+    "Properties": [
+      "00000000-0000-4000-8000-000000000104",
+      "48",
+      "\\\\?\\Volume{00000000-0000-4000-8000-000000000104}",
+      "0",
+      "",
+      "2",
+      "9",
+      "\\$LogFile",
+      "172032",
+      "0",
+      "0",
+      "5716",
+      "0"
+    ],
+    "Message": "O NTFS detectou uma gravação interrompida em um volume. \r\n\r\n           ID de correlação do volume:  {00000000-0000-4000-8000-000000000104}\r\n           nome do volume:  \\\\?\\Volume{00000000-0000-4000-8000-000000000104}\r\n           rótulo do volume:  \r\n           arquivo de referência:  0x2\r\n           nome do arquivo:  \\$LogFile\r\n           diferença de bytes do buffer no arquivo:  172032\r\n           deslocamento de byte da estrutura interrompida no buffer:  0\r\n           de bloco de blocos:  0\r\n           esperado número de sequência:  5716\r\n           número de sequência real:  0\r\n"
+  },
+  {
+    "TimeUtc": "2026-11-08T18:01:57.2426959Z",
+    "Provider": "Microsoft-Windows-Kernel-Power",
+    "Id": 41,
+    "Level": 1,
+    "RecordId": 12739,
+    "Properties": [
+      "0",
+      "0",
+      "0",
+      "0",
+      "0",
+      "0",
+      "0",
+      "0",
+      "0",
+      "False",
+      "0",
+      "0",
+      "False",
+      "0",
+      "0",
+      "False",
+      "False",
+      "0",
+      "0",
+      "3",
+      "0"
+    ],
+    "Message": "O sistema foi reiniciado sem um desligamento correto primeiro. Esse erro pode ser causado quando o sistema para de responder, trava ou fica sem energia inesperadamente."
+  },
+  {
+    "TimeUtc": "2026-11-08T18:02:11.6025814Z",
+    "Provider": "EventLog",
+    "Id": 6008,
+    "Level": 2,
+    "RecordId": 12712,
+    "Properties": [
+      "2:59:28 PM",
+      "‎11/‎8/‎2026",
+      "",
+      "",
+      "84",
+      "",
+      "",
+      "234 7 11 0 0 0 8 0 14 0 59 0 28 0 222 2 234 7 11 0 0 0 8 0 17 0 59 0 28 0 222 2 60 0 0 0 60 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 126 4 0 0"
+    ],
+    "Message": "O desligamento do sistema que ocorreu às 2:59:28 PM do dia ‎11/‎8/‎2026 não era esperado."
+  }
+]

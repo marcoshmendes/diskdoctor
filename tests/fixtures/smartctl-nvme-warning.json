@@ -1,0 +1,40 @@
+{
+  "json_format_version": [1, 0],
+  "smartctl": {
+    "version": [7, 5],
+    "argv": ["smartctl", "-x", "--json=c", "/dev/sdd"],
+    "exit_status": 64,
+    "messages": [{ "string": "Synthetic fixture for tests", "severity": "information" }]
+  },
+  "device": { "name": "/dev/sdd", "info_name": "/dev/sdd", "type": "nvme", "protocol": "NVMe" },
+  "model_name": "Example NVMe SSD 1TB",
+  "serial_number": "S5GXNX0R123456A",
+  "firmware_version": "3B2QGXA7",
+  "user_capacity": { "blocks": 1953525168, "bytes": 1000204886016 },
+  "smart_support": { "available": true, "enabled": true },
+  "smart_status": { "passed": true, "nvme": { "value": 0 } },
+  "nvme_smart_health_information_log": {
+    "critical_warning": 0,
+    "temperature": 74,
+    "available_spare": 100,
+    "available_spare_threshold": 10,
+    "percentage_used": 12,
+    "data_units_read": 123456789,
+    "data_units_written": 98765432,
+    "host_reads": 1234567890,
+    "host_writes": 987654321,
+    "controller_busy_time": 4321,
+    "power_cycles": 900,
+    "power_on_hours": 5000,
+    "unsafe_shutdowns": 40,
+    "media_errors": 3,
+    "num_err_log_entries": 120,
+    "warning_temp_time": 15,
+    "critical_comp_time": 0,
+    "temperature_sensors": [74, 61]
+  },
+  "nvme_composite_temperature_threshold": { "warning": 82, "critical": 85 },
+  "temperature": { "current": 74 },
+  "power_cycle_count": 900,
+  "power_on_time": { "hours": 5000 }
+}
