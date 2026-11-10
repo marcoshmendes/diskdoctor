@@ -2,6 +2,11 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Dates are YYYY-MM-DD.
 
+## [Unreleased]
+
+### Changed
+- CI and release workflows use `actions/checkout@v7`, which runs on Node 24 (Node 20 is deprecated on GitHub runners).
+
 ## [0.3.0] — 2026-11-10
 
 ### Added
