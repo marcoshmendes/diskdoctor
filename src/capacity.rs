@@ -1,22 +1,24 @@
-//! Verificação de capacidade real — detecta pendrives, cartões e discos com capacidade
-//! falsificada, no estilo do `f3write`/`f3read`.
+//! Capacity Verification engine: detects USB flash drives, cards and disks with
+//! counterfeit capacity, in the style of `f3write`/`f3read`.
 //!
-//! Como funciona:
-//! 1. **Gravação**: cria arquivos **novos** (1 GiB cada) numa pasta **nova** do volume e
-//!    preenche o espaço livre. Cada pedaço de 4 KiB leva um cabeçalho com a sua posição
-//!    no fluxo de dados (`offset`) e a semente desta execução, seguido de bytes
-//!    pseudoaleatórios derivados dos dois.
-//! 2. **Verificação**: reabre cada arquivo só para leitura, sem cache do Windows, e confere
-//!    pedaço por pedaço.
+//! How it works:
+//! 1. **Write**: creates **new** files (1 GiB each) in a **new** folder of the volume and
+//!    fills the free space. Every 4 KiB chunk carries a header with its position in the
+//!    data stream (`offset`) and this run's seed, followed by pseudo-random bytes derived
+//!    from both.
+//! 2. **Verify**: reopens each file read-only, bypassing the Windows cache, and checks it
+//!    chunk by chunk.
 //!
-//! Um dispositivo falso "dá a volta": o que é gravado além da capacidade real cai em cima
-//! do que foi gravado antes. Isso aparece como pedaço com o cabeçalho de **outra posição**
-//! ([`ChunkState::Overwritten`]). Outros falsos descartam a gravação e devolvem zeros
-//! ([`ChunkState::Lost`]) a partir de certo ponto.
+//! A fake device "wraps around": whatever is written past its real capacity lands on top
+//! of what was written before. That shows up as a chunk carrying the header of **another
+//! position** ([`ChunkState::Overwritten`]). Other fakes drop the writes and return zeros
+//! ([`ChunkState::Lost`]) from some point on.
 //!
-//! O motor só conhece os traits [`VerifyTarget`]/[`VerifyFile`]; a implementação real
-//! (pasta nova + `CREATE_NEW` + `NO_BUFFERING`) fica em `platform::win::CapacityDir`.
+//! The engine only knows the [`VerifyTarget`]/[`VerifyFile`] traits; the real
+//! implementation (new folder + `CREATE_NEW` + `NO_BUFFERING`) is in
+//! `platform::win::CapacityDir`.
 
+use crate::i18n::t;
 use crate::inventory::DiskIdentity;
 use crate::io::{IoOutcome, VerifyFile, VerifyTarget, describe_error, win32};
 use crate::scan::ScanStatus;
@@ -26,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-/// Granularidade da verificação.
+/// Verification granularity.
 pub const CHUNK: usize = 4096;
 const MAGIC: [u8; 8] = *b"DDCAPv01";
 const MAX_BAD_RANGES: usize = 200;
@@ -34,17 +36,17 @@ const MAX_ERROR_SAMPLES: usize = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CapacityConfig {
-    /// Quanto gravar (arredondado para baixo para múltiplo de `block_size`).
+    /// How much to write (rounded down to a multiple of `block_size`).
     pub total_bytes: u64,
-    /// Tamanho de cada arquivo de teste (1 GiB cabe até em FAT32).
+    /// Size of each test file (1 GiB fits even on FAT32).
     pub file_size: u64,
-    /// Tamanho de cada gravação/leitura (múltiplo de 4 KiB).
+    /// Size of each write/read (multiple of 4 KiB).
     pub block_size: u32,
-    /// Tempo limite por operação. Flash barata pode levar segundos para gravar um bloco.
+    /// Timeout per operation. Cheap flash can take seconds to write a block.
     pub io_timeout_ms: u64,
-    /// Interrompe após esta quantidade de falhas de gravação seguidas.
+    /// Stops after this many consecutive write failures.
     pub max_consecutive_errors: u32,
-    /// Semente desta execução: dado de uma execução anterior nunca passa como válido.
+    /// This run's seed: data from an earlier run never passes as valid.
     pub seed: u64,
 }
 
@@ -54,7 +56,7 @@ impl Default for CapacityConfig {
     }
 }
 
-/// Semente difícil de repetir entre execuções.
+/// A seed that is hard to repeat between runs.
 pub fn new_seed() -> u64 {
     let nanos = Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64;
     SplitMix64::new(nanos ^ (std::process::id() as u64).rotate_left(32)).next_u64()
@@ -71,22 +73,22 @@ fn fill_chunk(chunk: &mut [u8], offset: u64, seed: u64) {
     }
 }
 
-/// Preenche um bloco cujo primeiro byte fica na posição `stream_offset` do fluxo de teste.
+/// Fills a block whose first byte sits at `stream_offset` of the test stream.
 pub fn fill_block(buf: &mut [u8], stream_offset: u64, seed: u64) {
     for (i, chunk) in buf.chunks_mut(CHUNK).enumerate() {
         fill_chunk(chunk, stream_offset + (i * CHUNK) as u64, seed);
     }
 }
 
-/// Resultado da conferência de um pedaço de 4 KiB.
+/// Result of checking one 4 KiB chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkState {
     Ok,
-    /// Contém o dado de **outra posição** deste teste: o dispositivo sobrescreveu (capacidade falsa).
+    /// Holds the data of **another position** of this test: the device overwrote it (fake capacity).
     Overwritten,
-    /// Vazio (zeros/0xFF) ou de uma execução anterior: a gravação não persistiu.
+    /// Empty (zeros/0xFF) or from an earlier run: the write did not persist.
     Lost,
-    /// Conteúdo alterado (bits trocados).
+    /// Altered content (flipped bits).
     Corrupted,
 }
 
@@ -111,23 +113,23 @@ pub fn check_chunk(chunk: &[u8], expected_offset: u64, seed: u64, scratch: &mut 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapacityVerdict {
-    /// Tudo o que foi gravado foi lido de volta corretamente.
+    /// Everything written was read back correctly.
     Genuine,
-    /// Dados sobrescritos ou perdidos a partir de certo ponto: capacidade anunciada é falsa.
+    /// Data overwritten or lost from some point on: the advertised capacity is fake.
     Fake,
-    /// Falhas de gravação/leitura ou dados corrompidos espalhados: dispositivo com defeito.
+    /// Write/read failures or scattered corrupted data: defective device.
     Defective,
-    /// Cancelado ou nada gravado.
+    /// Cancelled or nothing written.
     Inconclusive,
 }
 
 impl CapacityVerdict {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Genuine => "Capacidade confirmada",
-            Self::Fake => "Capacidade FALSA",
-            Self::Defective => "Dispositivo com defeito",
-            Self::Inconclusive => "Inconclusivo",
+            Self::Genuine => t("Capacity confirmed", "Capacidade confirmada"),
+            Self::Fake => t("FAKE capacity", "Capacidade FALSA"),
+            Self::Defective => t("Defective device", "Dispositivo com defeito"),
+            Self::Inconclusive => t("Inconclusive", "Inconclusivo"),
         }
     }
 }
@@ -137,9 +139,9 @@ pub struct CapacityMetrics {
     pub status: ScanStatus,
     pub verdict: CapacityVerdict,
     pub planned_bytes: u64,
-    /// Bytes gravados com sucesso (segundo o dispositivo).
+    /// Bytes written successfully (according to the device).
     pub written_bytes: u64,
-    /// Bytes conferidos na leitura.
+    /// Bytes checked on read-back.
     pub verified_bytes: u64,
     pub ok_bytes: u64,
     pub overwritten_bytes: u64,
@@ -147,11 +149,11 @@ pub struct CapacityMetrics {
     pub corrupted_bytes: u64,
     pub unreadable_bytes: u64,
     pub write_errors: u64,
-    /// A gravação parou porque o volume encheu antes do planejado.
+    /// Writing stopped because the volume filled up earlier than planned.
     pub stopped_by_full_disk: bool,
-    /// Primeira posição (no fluxo de teste) com dado incorreto.
+    /// First position (in the test stream) with wrong data.
     pub first_bad_offset: Option<u64>,
-    /// Faixas `[início, fim)` do fluxo com problema (mescladas; até 200).
+    /// `[start, end)` ranges of the stream with problems (merged; up to 200).
     pub bad_ranges: Vec<(u64, u64)>,
     pub files_created: u32,
     pub write_seconds: f64,
@@ -209,25 +211,25 @@ impl CapacityMetrics {
     }
 }
 
-/// Resultado completo, salvo em `<dados>\capacity\` e incluído no relatório.
+/// Full result, saved in `<data>\capacity\` and included in the report.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CapacityResult {
     pub tool_version: String,
     pub disk: DiskIdentity,
-    /// Volume testado ("E:").
+    /// Tested volume ("E:").
     pub volume: String,
     pub file_system: Option<String>,
     pub volume_size: Option<u64>,
-    /// Espaço já ocupado antes do teste (não é testado).
+    /// Space already used before the test (not tested).
     pub used_before: u64,
     pub free_before: u64,
     pub started_at: DateTime<Utc>,
     pub finished_at: DateTime<Utc>,
     pub config: CapacityConfig,
     pub metrics: CapacityMetrics,
-    /// Estimativa da capacidade real quando o veredito é "falsa".
+    /// Estimated real capacity when the verdict is "fake".
     pub estimated_real_capacity: Option<u64>,
-    /// Os arquivos de teste foram apagados no fim.
+    /// The test files were deleted at the end.
     pub cleanup_ok: bool,
 }
 
@@ -268,8 +270,8 @@ fn mb_per_s(bytes: u64, secs: f64) -> f64 {
     if secs <= 0.0 { 0.0 } else { bytes as f64 / 1e6 / secs }
 }
 
-/// Os problemas se concentram no fim do fluxo (tudo certo até X, quase nada certo depois)?
-/// É o padrão de dispositivo que descarta gravações além da capacidade real.
+/// Are the problems concentrated at the end of the stream (fine up to X, almost nothing
+/// fine after it)? That is the pattern of a device that drops writes past its real capacity.
 fn bad_tail(m: &CapacityMetrics, span: u64) -> bool {
     let Some(first) = m.first_bad_offset else { return false };
     let after = span.saturating_sub(first);
@@ -289,7 +291,11 @@ fn decide(m: &CapacityMetrics, span: u64) -> CapacityVerdict {
     }
 }
 
-/// Executa gravação e verificação. Nunca toca em nada além dos arquivos que o `target` cria.
+fn timeout_text() -> String {
+    t("timed out", "tempo limite esgotado").into()
+}
+
+/// Runs the write and verify phases. Never touches anything but the files `target` creates.
 pub fn run_capacity_test(
     target: &mut dyn VerifyTarget,
     cfg: &CapacityConfig,
@@ -303,10 +309,11 @@ pub fn run_capacity_test(
     let mut m = CapacityMetrics::new(total);
     let mut buf = vec![0u8; block as usize];
     let mut scratch = vec![0u8; CHUNK];
-    // Quais blocos foram gravados com sucesso (só eles são conferidos).
+    // Which blocks were written successfully (only those are checked).
     let mut written_ok: Vec<bool> = Vec::with_capacity((total / block) as usize);
+    let mut hung = false;
 
-    // ---------------------------------------------------------------- gravação
+    // ---------------------------------------------------------------- write
     obs.on_phase(CapacityPhase::Write, total);
     let t0 = Instant::now();
     let mut file: Option<(u32, Box<dyn VerifyFile>)> = None;
@@ -319,7 +326,7 @@ pub fn run_capacity_test(
         }
         let idx = (s / file_size) as u32;
         if file.as_ref().is_none_or(|(i, _)| *i != idx) {
-            file = None; // fecha o anterior antes de criar o próximo
+            file = None; // close the previous one before creating the next
             match target.create_file(idx) {
                 Ok(f) => {
                     file = Some((idx, f));
@@ -330,13 +337,18 @@ pub fn run_capacity_test(
                     break;
                 }
                 Err(code) => {
-                    m.status = ScanStatus::Aborted(format!("não foi possível criar o arquivo de teste {}: {}", idx + 1, describe_error(code)));
+                    m.status = ScanStatus::Aborted(tr!(
+                        "could not create test file {}: {}",
+                        "não foi possível criar o arquivo de teste {}: {}",
+                        idx + 1,
+                        describe_error(code)
+                    ));
                     break;
                 }
             }
         }
         fill_block(&mut buf, s, cfg.seed);
-        let (_, f) = file.as_mut().expect("arquivo aberto");
+        let (_, f) = file.as_mut().expect("file open");
         match f.write_block(s % file_size, &buf, timeout) {
             IoOutcome::Completed { bytes, .. } if bytes as u64 == block => {
                 written_ok.push(true);
@@ -348,7 +360,8 @@ pub fn run_capacity_test(
                 break;
             }
             IoOutcome::Hung { .. } => {
-                m.status = ScanStatus::Aborted("o dispositivo parou de responder durante a gravação".into());
+                m.status = ScanStatus::Aborted(t("the device stopped responding while writing", "o dispositivo parou de responder durante a gravação").into());
+                hung = true;
                 break;
             }
             other => {
@@ -357,16 +370,16 @@ pub fn run_capacity_test(
                 consecutive += 1;
                 let why = match other {
                     IoOutcome::Failed { code, .. } => describe_error(code),
-                    IoOutcome::TimedOut { .. } => "tempo limite esgotado".into(),
-                    IoOutcome::Completed { bytes, .. } => format!("gravação curta ({bytes} bytes)"),
+                    IoOutcome::TimedOut { .. } => timeout_text(),
+                    IoOutcome::Completed { bytes, .. } => tr!("short write ({bytes} bytes)", "gravação curta ({bytes} bytes)"),
                     IoOutcome::Hung { .. } => unreachable!(),
                 };
-                let text = format!("falha ao gravar na posição {s}: {why}");
+                let text = tr!("write failed at position {s}: {why}", "falha ao gravar na posição {s}: {why}");
                 obs.on_problem(&text);
                 m.sample(text);
                 m.mark_bad(s, block);
                 if consecutive >= cfg.max_consecutive_errors.max(1) {
-                    m.status = ScanStatus::Aborted(format!("{consecutive} falhas de gravação seguidas"));
+                    m.status = ScanStatus::Aborted(tr!("{consecutive} consecutive write failures", "{consecutive} falhas de gravação seguidas"));
                     break;
                 }
             }
@@ -385,9 +398,8 @@ pub fn run_capacity_test(
     m.write_seconds = t0.elapsed().as_secs_f64();
     m.write_mb_per_s = mb_per_s(m.written_bytes, m.write_seconds);
 
-    // ---------------------------------------------------------------- verificação
+    // ---------------------------------------------------------------- verify
     let span = written_ok.len() as u64 * block;
-    let hung = matches!(&m.status, ScanStatus::Aborted(r) if r.contains("parou de responder"));
     if m.status != ScanStatus::Cancelled && !hung && span > 0 {
         obs.on_phase(CapacityPhase::Verify, span);
         let t1 = Instant::now();
@@ -406,7 +418,12 @@ pub fn run_capacity_test(
                     Ok(f) => file = Some((idx, f)),
                     Err(code) => {
                         failed_open = Some(idx);
-                        let text = format!("não foi possível reabrir o arquivo de teste {}: {}", idx + 1, describe_error(code));
+                        let text = tr!(
+                            "could not reopen test file {}: {}",
+                            "não foi possível reabrir o arquivo de teste {}: {}",
+                            idx + 1,
+                            describe_error(code)
+                        );
                         obs.on_problem(&text);
                         m.sample(text);
                     }
@@ -417,7 +434,7 @@ pub fn run_capacity_test(
                     m.unreadable_bytes += block;
                     m.mark_bad(s, block);
                 } else {
-                    let (_, f) = file.as_mut().expect("arquivo aberto");
+                    let (_, f) = file.as_mut().expect("file open");
                     match f.read_block(s % file_size, &mut buf, timeout) {
                         IoOutcome::Completed { bytes, .. } if bytes as u64 == block => {
                             for (ci, chunk) in buf.chunks(CHUNK).enumerate() {
@@ -436,7 +453,9 @@ pub fn run_capacity_test(
                             }
                         }
                         IoOutcome::Hung { .. } => {
-                            m.status = ScanStatus::Aborted("o dispositivo parou de responder durante a verificação".into());
+                            m.status = ScanStatus::Aborted(
+                                t("the device stopped responding while verifying", "o dispositivo parou de responder durante a verificação").into(),
+                            );
                             break;
                         }
                         other => {
@@ -444,11 +463,11 @@ pub fn run_capacity_test(
                             m.mark_bad(s, block);
                             let why = match other {
                                 IoOutcome::Failed { code, .. } => describe_error(code),
-                                IoOutcome::TimedOut { .. } => "tempo limite esgotado".into(),
-                                IoOutcome::Completed { bytes, .. } => format!("leitura curta ({bytes} bytes)"),
+                                IoOutcome::TimedOut { .. } => timeout_text(),
+                                IoOutcome::Completed { bytes, .. } => tr!("short read ({bytes} bytes)", "leitura curta ({bytes} bytes)"),
                                 IoOutcome::Hung { .. } => unreachable!(),
                             };
-                            let text = format!("falha ao ler a posição {s}: {why}");
+                            let text = tr!("read failed at position {s}: {why}", "falha ao ler a posição {s}: {why}");
                             obs.on_problem(&text);
                             m.sample(text);
                         }
@@ -472,8 +491,8 @@ pub fn run_capacity_test(
     m
 }
 
-/// Capacidade real estimada de um dispositivo falso: o que já estava ocupado mais o que
-/// foi lido de volta corretamente.
+/// Estimated real capacity of a fake device: what was already used plus what was read
+/// back correctly.
 pub fn estimate_real_capacity(m: &CapacityMetrics, used_before: u64) -> Option<u64> {
     (m.verdict == CapacityVerdict::Fake).then_some(used_before + m.ok_bytes)
 }
@@ -488,11 +507,11 @@ mod tests {
 
     #[derive(Clone, Copy, PartialEq)]
     enum Mode {
-        /// Dispositivo honesto.
+        /// Honest device.
         Normal,
-        /// Endereços acima da capacidade real voltam para o início (falso clássico).
+        /// Addresses above the real capacity wrap to the start (classic fake).
         Wrap,
-        /// Gravações acima da capacidade real somem; a leitura devolve zeros.
+        /// Writes above the real capacity vanish; reads return zeros.
         Drop,
     }
 
@@ -501,11 +520,13 @@ mod tests {
         real: u64,
         data: Vec<u8>,
         file_size: u64,
-        /// Posições do fluxo cuja leitura volta com um bit trocado.
+        /// Stream positions whose read comes back with a flipped bit.
         flip_on_read: Vec<u64>,
-        /// Posição a partir da qual o volume está cheio.
+        /// Position from which the volume is full.
         full_at: Option<u64>,
         created: Vec<u32>,
+        /// Position at which writes hang.
+        hang_at: Option<u64>,
     }
 
     struct Target(Rc<RefCell<Device>>);
@@ -518,6 +539,9 @@ mod tests {
         fn write_block(&mut self, offset: u64, data: &[u8], _t: Duration) -> IoOutcome {
             let mut d = self.dev.borrow_mut();
             let s = self.base + offset;
+            if d.hang_at.is_some_and(|h| s >= h) {
+                return IoOutcome::Hung { latency: Duration::ZERO };
+            }
             if d.full_at.is_some_and(|f| s + data.len() as u64 > f) {
                 return IoOutcome::Failed { code: win32::ERROR_DISK_FULL, latency: Duration::ZERO };
             }
@@ -566,19 +590,28 @@ mod tests {
             if d.full_at.is_some_and(|f| base >= f) {
                 return Err(win32::ERROR_DISK_FULL);
             }
-            assert!(!d.created.contains(&index), "nunca recria um arquivo");
+            assert!(!d.created.contains(&index), "never recreates a file");
             d.created.push(index);
             Ok(Box::new(File { dev: self.0.clone(), base }))
         }
         fn open_file(&mut self, index: u32) -> Result<Box<dyn VerifyFile>, u32> {
             let d = self.0.borrow();
-            assert!(d.created.contains(&index), "só reabre arquivos que criou");
+            assert!(d.created.contains(&index), "only reopens files it created");
             Ok(Box::new(File { dev: self.0.clone(), base: index as u64 * d.file_size }))
         }
     }
 
     fn device(mode: Mode, real: u64) -> Rc<RefCell<Device>> {
-        Rc::new(RefCell::new(Device { mode, real, data: vec![0; real as usize], file_size: 16 * MIB, flip_on_read: vec![], full_at: None, created: vec![] }))
+        Rc::new(RefCell::new(Device {
+            mode,
+            real,
+            data: vec![0; real as usize],
+            file_size: 16 * MIB,
+            flip_on_read: vec![],
+            full_at: None,
+            created: vec![],
+            hang_at: None,
+        }))
     }
 
     fn cfg(total: u64) -> CapacityConfig {
@@ -602,18 +635,18 @@ mod tests {
 
     #[test]
     fn wraparound_fake_is_detected_with_real_size_estimate() {
-        // Anuncia 64 MiB, tem 24 MiB: o que passa de 24 MiB cai por cima do começo.
+        // Advertises 64 MiB, has 24 MiB: whatever goes past 24 MiB lands on the start.
         let dev = device(Mode::Wrap, 24 * MIB);
         let m = run(&dev, 64 * MIB);
         assert_eq!(m.verdict, CapacityVerdict::Fake);
         assert!(m.overwritten_bytes > 0);
-        assert_eq!(m.ok_bytes, 24 * MIB, "só o último giro sobrevive");
+        assert_eq!(m.ok_bytes, 24 * MIB, "only the last lap survives");
         assert_eq!(estimate_real_capacity(&m, 2 * MIB), Some(26 * MIB));
     }
 
     #[test]
     fn fake_that_drops_writes_is_detected() {
-        // Anuncia 256 MiB, tem 160 MiB: o que passa disso some e a leitura volta zerada.
+        // Advertises 256 MiB, has 160 MiB: anything beyond vanishes and reads back as zeros.
         let dev = device(Mode::Drop, 160 * MIB);
         let m = run(&dev, 256 * MIB);
         assert_eq!(m.verdict, CapacityVerdict::Fake);
@@ -630,6 +663,16 @@ mod tests {
         assert_eq!(m.verdict, CapacityVerdict::Defective);
         assert_eq!(m.corrupted_bytes, 2 * CHUNK as u64);
         assert_eq!(m.bad_ranges.len(), 2);
+    }
+
+    #[test]
+    fn hung_device_skips_verification_and_is_defective() {
+        let dev = device(Mode::Normal, 64 * MIB);
+        dev.borrow_mut().hang_at = Some(20 * MIB);
+        let m = run(&dev, 64 * MIB);
+        assert!(matches!(m.status, ScanStatus::Aborted(_)));
+        assert_eq!(m.verified_bytes, 0, "nothing is read back from a hung device");
+        assert_eq!(m.verdict, CapacityVerdict::Defective);
     }
 
     #[test]
@@ -657,7 +700,7 @@ mod tests {
         fill_chunk(&mut chunk, 8192, 7);
         assert_eq!(check_chunk(&chunk, 8192, 7, &mut scratch), ChunkState::Ok);
         assert_eq!(check_chunk(&chunk, 4096, 7, &mut scratch), ChunkState::Overwritten);
-        assert_eq!(check_chunk(&chunk, 8192, 8, &mut scratch), ChunkState::Lost, "dado de execução anterior");
+        assert_eq!(check_chunk(&chunk, 8192, 8, &mut scratch), ChunkState::Lost, "data from an earlier run");
         chunk[100] ^= 1;
         assert_eq!(check_chunk(&chunk, 8192, 7, &mut scratch), ChunkState::Corrupted);
         assert_eq!(check_chunk(&[0u8; CHUNK], 0, 7, &mut scratch), ChunkState::Lost);

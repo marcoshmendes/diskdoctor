@@ -1,9 +1,9 @@
 [package]
 name = "diskdoctor"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Diagnóstico não destrutivo de HDs, SSDs, pendrives e cartões de memória no Windows"
+description = "Non-destructive diagnostics for HDDs, SSDs, USB flash drives and memory cards on Windows"
 readme = "README.md"
 license = "MIT"
 repository = "https://github.com/marcoshmendes/diskdoctor"
@@ -30,8 +30,8 @@ regex = "1.13.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 
-# Bindings Win32 só existem no Windows; o restante do código (parsers, motor de
-# análise, motores de teste com leitores simulados) compila e é testável em qualquer SO.
+# Win32 bindings exist only on Windows; everything else (parsers, the analysis
+# engine, test engines with simulated readers) builds and is testable on any OS.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
@@ -40,6 +40,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Ioctl",
     "Win32_System_Threading",
     "Win32_Security",
+    "Win32_System_Console",
     "Win32_System_Diagnostics_Debug",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
@@ -53,6 +54,6 @@ tempfile = "3.27.0"
 [profile.release]
 lto = "thin"
 codegen-units = 1
-# NÃO usar `strip = true`: com o Smart App Control do Windows 11 ativado, o binário
-# "stripped" foi bloqueado (CodeIntegrity 3077) e o mesmo build sem strip roda.
+# Do NOT use `strip = true`: with Windows 11 Smart App Control enabled, the stripped
+# binary was blocked (CodeIntegrity 3077) while the same build without strip runs.
 strip = false

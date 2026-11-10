@@ -2,6 +2,7 @@
 
 use super::{Ctx, load_disks, print_json};
 use crate::app::exit;
+use crate::i18n::t;
 use crate::ui;
 use anyhow::Result;
 
@@ -13,7 +14,10 @@ pub fn run(ctx: &Ctx) -> Result<u8> {
     }
     ui::print_disk_table(&disks);
     if !ctx.elevated {
-        ui::note("Dica: em um terminal de Administrador, `diskdoctor health` lê o SMART completo.");
+        ui::note(t(
+            "Tip: in an Administrator terminal, `diskdoctor health` reads the full SMART data.",
+            "Dica: em um terminal de Administrador, `diskdoctor health` lê o SMART completo.",
+        ));
     }
     Ok(exit::OK)
 }

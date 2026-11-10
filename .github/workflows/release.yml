@@ -1,6 +1,6 @@
 name: Release
 
-# Publica uma versão ao enviar uma tag: git tag v0.2.0 && git push origin v0.2.0
+# Publishes a release when a tag is pushed: git tag -a v0.3.0 -m "diskdoctor 0.3.0" && git push origin v0.3.0
 on:
   push:
     tags: ["v*"]
@@ -10,23 +10,23 @@ permissions:
 
 jobs:
   build:
-    name: Compilar e publicar (Windows x64)
+    name: Build and publish (Windows x64)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Rust estável
+      - name: Stable Rust
         run: |
           rustup update stable --no-self-update
           rustup default stable
 
-      - name: Testes
+      - name: Tests
         run: cargo test --locked
 
-      - name: Compilar (release)
+      - name: Build (release)
         run: cargo build --release --locked
 
-      - name: Empacotar
+      - name: Package
         shell: pwsh
         run: |
           $name = "diskdoctor-${{ github.ref_name }}-windows-x64"
@@ -38,16 +38,17 @@ jobs:
           "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
           Get-Content "$name.zip.sha256"
 
-      - name: Publicar no GitHub Releases
+      - name: Publish to GitHub Releases
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $name = "diskdoctor-${{ github.ref_name }}-windows-x64"
           $notes = @"
-          Baixe ``$name.zip``, extraia e dê dois cliques em ``diskdoctor.exe``.
-          Para ler o SMART, instale também o smartmontools: ``winget install smartmontools.smartmontools``.
+          Download ``$name.zip``, extract it and double-click ``diskdoctor.exe``.
+          To read SMART data, also install smartmontools: ``winget install smartmontools.smartmontools``.
+          English by default; switch to Brazilian Portuguese with menu item 0 or ``diskdoctor language pt-BR``.
 
-          Novidades: veja o [CHANGELOG](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md).
+          What's new: see the [CHANGELOG](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md).
           "@
           gh release create "${{ github.ref_name }}" "$name.zip" "$name.zip.sha256" --title "diskdoctor ${{ github.ref_name }}" --notes $notes

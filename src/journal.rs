@@ -1,18 +1,18 @@
-//! Diário de cada disco: os diagnósticos (gravados por `health` e `report`) e as
-//! **mudanças** que o usuário registra ("troquei o cabo SATA", "mudei de porta"), para
-//! comparar **antes × depois**.
+//! Journal of each drive: the diagnoses (saved by `health` and `report`) and the
+//! **changes** the user records ("replaced the SATA cable", "moved to another port"), to
+//! compare **before × after**.
 //!
-//! Arquivo: `<dados>\journal\<fingerprint>.jsonl` (uma entrada por linha).
+//! File: `<data>\journal\<fingerprint>.jsonl` (one entry per line).
 //!
-//! Efeito de registrar uma mudança:
-//! - o veredito passa a considerar só os eventos do Windows **depois** dela
-//!   (`analysis::analyze_disk`), e o crescimento de contadores SMART é medido a partir
-//!   dela (`health::collect_health`); assim um problema já resolvido não continua
-//!   acusando por dias;
-//! - `diskdoctor history` compara os dois períodos ([`compare`]).
+//! Effect of recording a change:
+//! - the verdict only considers Windows events **after** it (`analysis::analyze_disk`),
+//!   and SMART counter growth is measured from it (`health::collect_health`), so a problem
+//!   that was already solved does not keep being reported for days;
+//! - `diskdoctor history` compares both periods ([`compare`]).
 
 use crate::analysis::DiskStatus;
-use crate::history::{PROBLEM_COUNTERS, SmartSnapshot};
+use crate::history::{PROBLEM_COUNTERS, SmartSnapshot, counter_label};
+use crate::i18n::t;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
@@ -21,9 +21,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const MAX_LINES: usize = if cfg!(test) { 50 } else { 2000 };
-/// Janela máxima de cada lado da mudança na comparação.
+/// Maximum window on each side of the change in the comparison.
 pub const MAX_COMPARE_DAYS: i64 = 14;
-/// Antes disso o efeito de uma mudança ainda não pode ser avaliado.
+/// Before this, the effect of a change cannot be assessed yet.
 pub const MIN_HOURS_AFTER: f64 = 24.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -32,9 +32,9 @@ pub struct DiagnosisRecord {
     pub disk_number: u32,
     pub status: DiskStatus,
     pub headline: String,
-    /// Regras que geraram achado (ex.: `comm.link`).
+    /// Rules that produced a finding (e.g. `comm.link`).
     pub findings: Vec<String>,
-    /// Eventos de E/S do disco (retries, resets, erros) considerados no veredito.
+    /// The drive's I/O events (retries, resets, errors) counted in the verdict.
     pub io_events: u64,
     pub window_hours: u32,
 }
@@ -76,7 +76,7 @@ impl Journal {
         self.dir.join(format!("{safe}.jsonl"))
     }
 
-    /// Entradas em ordem cronológica (linhas inválidas são ignoradas).
+    /// Entries in chronological order (invalid lines are skipped).
     pub fn load(&self, fingerprint: &str) -> Vec<JournalEntry> {
         let mut v: Vec<JournalEntry> = fs::read_to_string(self.path(fingerprint))
             .map(|text| text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect())
@@ -86,11 +86,11 @@ impl Journal {
     }
 
     pub fn append(&self, fingerprint: &str, entry: &JournalEntry) -> Result<()> {
-        fs::create_dir_all(&self.dir).with_context(|| format!("não foi possível criar {}", self.dir.display()))?;
+        fs::create_dir_all(&self.dir).with_context(|| tr!("could not create {}", "não foi possível criar {}", self.dir.display()))?;
         let path = self.path(fingerprint);
         let existing = self.load(fingerprint);
         if existing.len() >= MAX_LINES {
-            // Descarta os diagnósticos mais antigos; mudanças registradas nunca são descartadas.
+            // Drops the oldest diagnoses; recorded changes are never dropped.
             let mut excess = existing.len() + 1 - MAX_LINES;
             let kept: Vec<&JournalEntry> = existing
                 .iter()
@@ -136,18 +136,18 @@ impl Journal {
     }
 }
 
-/// Um dos lados da comparação.
+/// One side of the comparison.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PeriodStats {
     pub from: DateTime<Utc>,
     pub to: DateTime<Utc>,
-    /// Eventos de E/S atribuídos ao disco.
+    /// I/O events attributed to the drive.
     pub io_events: u64,
-    /// Kernel-Power 41 (reinicializações sem desligamento correto) no PC inteiro.
+    /// Kernel-Power 41 (restarts without a clean shutdown) on the whole PC.
     pub unexpected_reboots: u64,
-    /// Último veredito registrado no período.
+    /// Last verdict recorded in the period.
     pub status: Option<DiskStatus>,
-    /// Quanto cada contador SMART de problema cresceu no período (precisa de 2 leituras nele).
+    /// How much each SMART problem counter grew in the period (needs 2 readings in it).
     pub counter_growth: Vec<(String, u64)>,
     pub smart_readings: usize,
 }
@@ -164,23 +164,23 @@ impl PeriodStats {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Effect {
-    /// Menos de 24 h desde a mudança.
+    /// Less than 24 h since the change.
     TooEarly,
     Improved,
     NoChange,
     Worse,
-    /// Quase nada antes da mudança para comparar.
+    /// Almost nothing before the change to compare with.
     NotMeasurable,
 }
 
 impl Effect {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::TooEarly => "Cedo demais para avaliar",
-            Self::Improved => "Melhorou",
-            Self::NoChange => "Sem mudança clara",
-            Self::Worse => "Piorou",
-            Self::NotMeasurable => "Não dá para medir",
+            Self::TooEarly => t("Too early to tell", "Cedo demais para avaliar"),
+            Self::Improved => t("Improved", "Melhorou"),
+            Self::NoChange => t("No clear change", "Sem mudança clara"),
+            Self::Worse => t("Got worse", "Piorou"),
+            Self::NotMeasurable => t("Not measurable", "Não dá para medir"),
         }
     }
 }
@@ -202,10 +202,10 @@ fn growth(snapshots: &[SmartSnapshot], from: DateTime<Utc>, to: DateTime<Utc>) -
     };
     let changes = PROBLEM_COUNTERS
         .iter()
-        .filter_map(|(key, label)| {
+        .filter_map(|(key, ..)| {
             let a = *first.counters.get(*key)?;
             let b = *last.counters.get(*key)?;
-            (b > a).then(|| (label.to_string(), b - a))
+            (b > a).then(|| (counter_label(key), b - a))
         })
         .collect();
     (changes, inside.len())
@@ -251,7 +251,7 @@ fn decide(hours_since: f64, before: &PeriodStats, after: &PeriodStats) -> Effect
     if by_events != Effect::NotMeasurable {
         return by_events;
     }
-    // Sem eventos, os contadores SMART (ex.: CRC, que sobe com cabo ruim) ainda podem decidir.
+    // Without events, the SMART counters (e.g. CRC, which rises with a bad cable) can still decide.
     let (gb, ga) = (before.counter_growth_total(), after.counter_growth_total());
     match (before.smart_readings >= 2 && after.smart_readings >= 2, gb, ga) {
         (true, gb, 0) if gb > 0 => Effect::Improved,
@@ -263,35 +263,42 @@ fn decide(hours_since: f64, before: &PeriodStats, after: &PeriodStats) -> Effect
 fn summary(effect: Effect, before: &PeriodStats, after: &PeriodStats) -> String {
     let days = |p: &PeriodStats| crate::util::decimal(p.days(), 1);
     match effect {
-        Effect::TooEarly => format!(
+        Effect::TooEarly => tr!(
+            "The change was recorded less than {MIN_HOURS_AFTER} h ago. Use the computer normally and run `diskdoctor health` again in 1–3 days to compare.",
             "A mudança foi registrada há menos de {MIN_HOURS_AFTER} h. Use o computador normalmente e rode `diskdoctor health` de novo daqui a 1–3 dias para comparar."
         ),
-        Effect::Improved => format!(
+        Effect::Improved => tr!(
+            "Problems dropped from {} to {} events ({} days on each side): the change most likely fixed it. Keep watching — intermittent failures can take days to come back.",
             "Os problemas caíram de {} para {} eventos ({} dias de cada lado): a mudança provavelmente resolveu. Continue observando — falhas intermitentes podem levar dias para reaparecer.",
             before.io_events,
             after.io_events,
             days(after)
         ),
-        Effect::NoChange => format!(
+        Effect::NoChange => tr!(
+            "{} events before and {} after ({} days on each side): the change did not fix it. The cause is probably another component.",
             "{} eventos antes e {} depois ({} dias de cada lado): a mudança não resolveu. A causa provavelmente está em outro componente.",
             before.io_events,
             after.io_events,
             days(after)
         ),
-        Effect::Worse => format!(
+        Effect::Worse => tr!(
+            "Problems increased ({} → {} events). Undo the change or check how it was done.",
             "Os problemas aumentaram ({} → {} eventos). Desfaça a mudança ou verifique a instalação dela.",
-            before.io_events, after.io_events
+            before.io_events,
+            after.io_events
         ),
-        Effect::NotMeasurable => {
-            "Quase não havia erros registrados antes da mudança, então não dá para medir o efeito dela pelos eventos.".to_string()
-        }
+        Effect::NotMeasurable => t(
+            "There were almost no errors recorded before the change, so its effect cannot be measured by events.",
+            "Quase não havia erros registrados antes da mudança, então não dá para medir o efeito dela pelos eventos.",
+        )
+        .to_string(),
     }
 }
 
-/// Compara os períodos de mesma duração antes e depois de uma mudança.
+/// Compares periods of the same length before and after a change.
 ///
-/// `io_events` são os horários dos eventos de E/S **deste disco**; `reboots`, os
-/// Kernel-Power 41 do PC; `snapshots`, as leituras SMART salvas.
+/// `io_events` are the times of the I/O events of **this drive**; `reboots`, the PC's
+/// Kernel-Power 41 events; `snapshots`, the saved SMART readings.
 pub fn compare(
     note: &NoteRecord,
     io_events: &[DateTime<Utc>],
@@ -313,35 +320,36 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    fn t(days_ago: f64, now: DateTime<Utc>) -> DateTime<Utc> {
+    fn at(days_ago: f64, now: DateTime<Utc>) -> DateTime<Utc> {
         now - ChronoDuration::seconds((days_ago * 86_400.0) as i64)
     }
 
     fn note(days_ago: f64, now: DateTime<Utc>) -> NoteRecord {
-        NoteRecord { time: t(days_ago, now), disk_number: 2, text: "Troquei o cabo SATA".into() }
+        NoteRecord { time: at(days_ago, now), disk_number: 2, text: "Replaced the SATA cable".into() }
     }
 
     fn events(days_ago: &[f64], now: DateTime<Utc>) -> Vec<DateTime<Utc>> {
-        days_ago.iter().map(|d| t(*d, now)).collect()
+        days_ago.iter().map(|d| at(*d, now)).collect()
     }
 
     #[test]
     fn cable_swap_that_fixed_the_problem_is_improved() {
+        let _en = crate::i18n::scoped(crate::i18n::Lang::En);
         let now = Utc::now();
-        // Mudança há 3 dias; 40 retries nos 3 dias anteriores, nenhum depois.
+        // Change 3 days ago; 40 retries in the 3 days before, none after.
         let before: Vec<f64> = (0..40).map(|i| 3.1 + i as f64 * 0.07).collect();
         let c = compare(&note(3.0, now), &events(&before, now), &events(&[4.0, 5.0], now), &[], &[], now);
         assert_eq!(c.effect, Effect::Improved);
         assert_eq!(c.before.io_events, 40);
         assert_eq!(c.after.io_events, 0);
         assert_eq!(c.before.unexpected_reboots, 2);
-        assert!(c.summary.contains("provavelmente resolveu"));
+        assert!(c.summary.contains("most likely fixed it"));
     }
 
     #[test]
     fn same_error_rate_after_change_is_no_change() {
         let now = Utc::now();
-        let ev: Vec<f64> = (0..60).map(|i| 0.05 + i as f64 * 0.1).collect(); // espalhados em 6 dias
+        let ev: Vec<f64> = (0..60).map(|i| 0.05 + i as f64 * 0.1).collect(); // spread over 6 days
         let c = compare(&note(3.0, now), &events(&ev, now), &[], &[], &[], now);
         assert_eq!(c.effect, Effect::NoChange, "{c:?}");
     }
@@ -357,19 +365,24 @@ mod tests {
 
     #[test]
     fn recent_change_is_too_early() {
+        let _en = crate::i18n::scoped(crate::i18n::Lang::En);
         let now = Utc::now();
         let c = compare(&note(0.25, now), &events(&[0.5, 0.6, 0.7], now), &[], &[], &[], now);
         assert_eq!(c.effect, Effect::TooEarly);
+        assert!(c.summary.contains("run `diskdoctor health`"));
+        let _pt = crate::i18n::scoped(crate::i18n::Lang::PtBr);
+        let c = compare(&note(0.25, now), &[], &[], &[], &[], now);
         assert!(c.summary.contains("rode `diskdoctor health`"));
     }
 
     #[test]
     fn crc_growth_decides_when_there_are_no_events() {
+        let _en = crate::i18n::scoped(crate::i18n::Lang::En);
         let now = Utc::now();
-        let snap = |days: f64, crc: u64| SmartSnapshot { time: t(days, now), counters: BTreeMap::from([("interface_crc_errors".to_string(), crc)]) };
+        let snap = |days: f64, crc: u64| SmartSnapshot { time: at(days, now), counters: BTreeMap::from([("interface_crc_errors".to_string(), crc)]) };
         let snaps = vec![snap(5.5, 100), snap(4.0, 180), snap(2.9, 230), snap(1.0, 230), snap(0.1, 230)];
         let c = compare(&note(3.0, now), &[], &[], &[], &snaps, now);
-        assert_eq!(c.before.counter_growth, vec![("Erros CRC de interface (199)".to_string(), 80)]);
+        assert_eq!(c.before.counter_growth, vec![("Interface CRC errors (199)".to_string(), 80)]);
         assert!(c.after.counter_growth.is_empty());
         assert_eq!(c.effect, Effect::Improved);
     }
@@ -389,7 +402,7 @@ mod tests {
         j.append("fp1", &JournalEntry::Note(note(10.0, now))).unwrap();
         for i in 0..(MAX_LINES + 5) {
             let d = DiagnosisRecord {
-                time: t(9.0 - i as f64 * 0.001, now),
+                time: at(9.0 - i as f64 * 0.001, now),
                 disk_number: 2,
                 status: DiskStatus::Warning,
                 headline: "x".into(),
@@ -401,8 +414,8 @@ mod tests {
         }
         let all = j.load("fp1");
         assert_eq!(all.len(), MAX_LINES);
-        assert_eq!(j.notes("fp1").len(), 1, "a mudança registrada nunca é descartada");
-        assert_eq!(j.latest_note("fp1").unwrap().text, "Troquei o cabo SATA");
+        assert_eq!(j.notes("fp1").len(), 1, "a recorded change is never dropped");
+        assert_eq!(j.latest_note("fp1").unwrap().text, "Replaced the SATA cable");
         assert!(all.windows(2).all(|w| w[0].time() <= w[1].time()));
     }
 }

@@ -1,14 +1,17 @@
-//! Benchmark de leitura (disco físico, somente leitura) e de escrita (somente em
-//! arquivo temporário novo, após confirmação explícita no CLI).
+//! Benchmark: reads on the physical drive (read-only) and, optionally, writes to a new
+//! temporary file only, after an explicit confirmation in the CLI.
 //!
-//! Tudo em fila de profundidade 1 (QD1): é o padrão de acesso que mais expõe
-//! travamentos e latências altas — o objetivo é diagnóstico, não marketing.
+//! Everything runs at queue depth 1 (QD1): the access pattern that best exposes stalls
+//! and high latency — the goal is diagnosis, not marketing numbers.
 //!
-//! Leitura:
-//! - sequencial em 3 zonas (início, meio, fim) — em HD o fim é naturalmente mais
-//!   lento (trilhas internas); em SSD as zonas devem ser parecidas;
-//! - aleatória 4 KiB em todo o disco: IOPS e percentis de latência.
+//! Read:
+//! - Sequential Read in 3 zones (start, middle, end) — on HDDs the end is naturally slower
+//!   (inner tracks); on SSDs the zones should be similar;
+//! - Random 4 KiB over the whole drive: IOPS and latency percentiles.
+//!
+//! Saved results keep canonical English labels; [`display_label`] localizes them.
 
+use crate::i18n::is_pt;
 use crate::inventory::DiskIdentity;
 use crate::io::{BlockReader, BlockWriter, ErrorClass, IoOutcome, classify_error};
 use crate::scan::ScanStatus;
@@ -18,6 +21,33 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+pub const SEQ_START: &str = "Sequential Read · start";
+pub const SEQ_MIDDLE: &str = "Sequential Read · middle";
+pub const SEQ_END: &str = "Sequential Read · end";
+pub const SEQ_SINGLE: &str = "Sequential Read";
+pub const RANDOM_READ: &str = "Random 4 KiB Read · full drive";
+pub const SEQ_WRITE: &str = "Sequential Write · temporary file";
+pub const RANDOM_WRITE: &str = "Random 4 KiB Write · temporary file";
+
+/// (canonical, pt-BR, label saved by 0.2.x)
+const LABELS: &[(&str, &str, &str)] = &[
+    (SEQ_START, "Sequential Read · início", "Sequencial — início"),
+    (SEQ_MIDDLE, "Sequential Read · meio", "Sequencial — meio"),
+    (SEQ_END, "Sequential Read · fim", "Sequencial — fim"),
+    (SEQ_SINGLE, "Sequential Read", "Sequencial"),
+    (RANDOM_READ, "Random 4 KiB Read · disco inteiro", "Aleatória 4 KiB (todo o disco)"),
+    (SEQ_WRITE, "Sequential Write · arquivo temporário", "Escrita sequencial (arquivo temporário)"),
+    (RANDOM_WRITE, "Random 4 KiB Write · arquivo temporário", "Escrita aleatória 4 KiB (arquivo temporário)"),
+];
+
+/// Label of a phase in the active language (technical names stay in English).
+pub fn display_label(label: &str) -> String {
+    match LABELS.iter().find(|(canonical, _, legacy)| label == *canonical || label == *legacy) {
+        Some((canonical, pt, _)) => (if is_pt() { pt } else { canonical }).to_string(),
+        None => label.to_string(),
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BenchConfig {
@@ -131,7 +161,7 @@ fn account(outcome: IoOutcome, len: u32, p: &mut PhaseOutcome) {
         IoOutcome::Failed { code, .. } => {
             p.errors += 1;
             if classify_error(code) == ErrorClass::Fatal {
-                p.stop = Some(ScanStatus::Aborted(format!("erro fatal: {}", crate::io::describe_error(code))));
+                p.stop = Some(ScanStatus::Aborted(tr!("fatal error: {}", "erro fatal: {}", crate::io::describe_error(code))));
             }
         }
         IoOutcome::TimedOut { latency } => {
@@ -140,7 +170,7 @@ fn account(outcome: IoOutcome, len: u32, p: &mut PhaseOutcome) {
         }
         IoOutcome::Hung { .. } => {
             p.timeouts += 1;
-            p.stop = Some(ScanStatus::Aborted("o dispositivo parou de responder".into()));
+            p.stop = Some(ScanStatus::Aborted(crate::i18n::t("the device stopped responding", "o dispositivo parou de responder").into()));
         }
     }
 }
@@ -241,7 +271,7 @@ fn random_phase(
     (result, p.stop)
 }
 
-/// Benchmark de leitura no disco físico (QD1).
+/// Read benchmark on the physical drive (QD1).
 pub fn run_read_benchmark<R: BlockReader + ?Sized>(
     reader: &mut R,
     cfg: &BenchConfig,
@@ -257,13 +287,9 @@ pub fn run_read_benchmark<R: BlockReader + ?Sized>(
     let mut io = |o: u64, l: u32, t: Duration| reader.read_at(o, l, t);
 
     let zones: Vec<(&str, u64)> = if capacity >= zone * 3 && zone > 0 {
-        vec![
-            ("Sequencial — início", 0),
-            ("Sequencial — meio", align_down(capacity / 2, alignment)),
-            ("Sequencial — fim", align_down(capacity - zone, alignment)),
-        ]
+        vec![(SEQ_START, 0), (SEQ_MIDDLE, align_down(capacity / 2, alignment)), (SEQ_END, align_down(capacity - zone, alignment))]
     } else {
-        vec![("Sequencial", 0)]
+        vec![(SEQ_SINGLE, 0)]
     };
 
     let mut metrics = BenchMetrics { mode: BenchMode::Read, queue_depth: 1, sequential: vec![], random: None, status: ScanStatus::Completed };
@@ -276,7 +302,7 @@ pub fn run_read_benchmark<R: BlockReader + ?Sized>(
             return metrics;
         }
     }
-    let (r, stop) = random_phase(&mut io, "Aleatória 4 KiB (todo o disco)", capacity, cfg, alignment, timeout, observer, cancel);
+    let (r, stop) = random_phase(&mut io, RANDOM_READ, capacity, cfg, alignment, timeout, observer, cancel);
     metrics.random = Some(r);
     if let Some(s) = stop {
         metrics.status = s;
@@ -284,7 +310,7 @@ pub fn run_read_benchmark<R: BlockReader + ?Sized>(
     metrics
 }
 
-/// Benchmark de escrita em arquivo temporário (QD1): sequencial e depois aleatória 4 KiB.
+/// Write benchmark on a temporary file (QD1): Sequential Write, then Random 4 KiB.
 pub fn run_write_benchmark<W: BlockWriter + ?Sized>(
     writer: &mut W,
     cfg: &BenchConfig,
@@ -298,13 +324,13 @@ pub fn run_write_benchmark<W: BlockWriter + ?Sized>(
     let mut io = |o: u64, l: u32, t: Duration| writer.write_at(o, l, t);
 
     let mut metrics = BenchMetrics { mode: BenchMode::Write, queue_depth: 1, sequential: vec![], random: None, status: ScanStatus::Completed };
-    let (r, stop) = sequential_phase(&mut io, "Escrita sequencial (arquivo temporário)", 0, size, block, timeout, observer, cancel);
+    let (r, stop) = sequential_phase(&mut io, SEQ_WRITE, 0, size, block, timeout, observer, cancel);
     metrics.sequential.push(r);
     if let Some(s) = stop {
         metrics.status = s;
         return metrics;
     }
-    let (r, stop) = random_phase(&mut io, "Escrita aleatória 4 KiB (arquivo temporário)", size, cfg, alignment, timeout, observer, cancel);
+    let (r, stop) = random_phase(&mut io, RANDOM_WRITE, size, cfg, alignment, timeout, observer, cancel);
     metrics.random = Some(r);
     if let Some(s) = stop {
         metrics.status = s;
@@ -315,6 +341,7 @@ pub fn run_write_benchmark<W: BlockWriter + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::{Lang, scoped};
     use crate::io::testing::{ScriptedReader, ScriptedWriter};
     use crate::io::win32;
 
@@ -330,14 +357,29 @@ mod tests {
         let m = run_read_benchmark(&mut r, &small_cfg(), &mut NoopBenchObserver, &AtomicBool::new(false));
         assert_eq!(m.status, ScanStatus::Completed);
         assert_eq!(m.sequential.len(), 3);
+        assert_eq!(m.sequential.iter().map(|s| s.label.as_str()).collect::<Vec<_>>(), vec![SEQ_START, SEQ_MIDDLE, SEQ_END]);
         assert_eq!(m.sequential[2].offset, 248 * MIB);
         assert!(m.sequential.iter().all(|s| s.bytes == 8 * MIB && s.errors == 0));
         assert!((m.sequential[0].mb_per_s - 524.288).abs() < 1.0);
         let rnd = m.random.unwrap();
+        assert_eq!(rnd.label, RANDOM_READ);
         assert_eq!(rnd.ops, 500);
         assert!(rnd.iops > 0.0);
-        // Leituras aleatórias alinhadas a 4 KiB e dentro do disco.
+        // Random reads aligned to 4 KiB and inside the drive.
         assert!(r.reads.iter().all(|&(o, l)| o % 4096 == 0 && o + l as u64 <= 256 * MIB));
+    }
+
+    #[test]
+    fn labels_are_localized_for_display_including_legacy_ones() {
+        {
+            let _en = scoped(Lang::En);
+            assert_eq!(display_label(SEQ_END), "Sequential Read · end");
+            assert_eq!(display_label("Sequencial — fim"), "Sequential Read · end", "0.2.x label");
+            assert_eq!(display_label("something else"), "something else");
+        }
+        let _pt = scoped(Lang::PtBr);
+        assert_eq!(display_label(SEQ_END), "Sequential Read · fim");
+        assert_eq!(display_label(RANDOM_READ), "Random 4 KiB Read · disco inteiro");
     }
 
     #[test]

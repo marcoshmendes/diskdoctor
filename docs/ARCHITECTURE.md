@@ -1,158 +1,193 @@
-# Arquitetura e limitações técnicas
+# Architecture and technical limitations
 
-## Visão geral
+## Overview
 
 ```
-                    ┌────────────────────────── diskdoctor.exe ──────────────────────────┐
-  sem argumentos ►  │ interactive (menu dialoguer) ─┐                                    │
-  CLI (clap) ────►  │ app::dispatch ◄───────────────┘                                    │
-                    │ commands/*  ──► coleta ──► analysis::analyze ──► ui / report       │
-                    │                  │                                                 │
-                    │   inventory ─────┤ PowerShell 5.1 + CIM (Get-Disk, Win32_DiskDrive…)│
-                    │   smart ─────────┤ smartctl -x --json=c (processo externo)          │
-                    │   windows_counters┤ Get-StorageReliabilityCounter                   │
-                    │   events ────────┤ Get-WinEvent -FilterXPath (log System)           │
-                    │   scan/benchmark ┤ platform::win::RawDisk (Win32, E/S sobreposta)   │
-                    │   capacity ──────┤ platform::win::CapacityDir (arquivos novos)      │
-                    │   history/journal┤                                                 │
-                    │   tags/store ────┘ %LOCALAPPDATA%\diskdoctor (JSON/JSONL)           │
-                    └─────────────────────────────────────────────────────────────────────┘
+                    ┌─────────────────────────── diskdoctor.exe ───────────────────────────┐
+  no arguments   ►  │ interactive + menu (keyboard lists) ─┐                               │
+  CLI (clap) ────►  │ app::dispatch ◄───────────────────────┘     i18n (en / pt-BR)        │
+                    │ commands/*  ──► collection ──► analysis::analyze ──► ui / report     │
+                    │                  │                                                   │
+                    │   inventory ─────┤ PowerShell 5.1 + CIM (Get-Disk, Win32_DiskDrive…) │
+                    │   smart ─────────┤ smartctl -x --json=c (external process)           │
+                    │   windows_counters┤ Get-StorageReliabilityCounter                    │
+                    │   events ────────┤ Get-WinEvent -FilterXPath (System log)            │
+                    │   scan/benchmark ┤ platform::win::RawDisk (Win32, overlapped I/O)    │
+                    │   capacity ──────┤ platform::win::CapacityDir (new files)            │
+                    │   history/journal┤                                                   │
+                    │   tags/store ────┘ %LOCALAPPDATA%\diskdoctor (JSON/JSONL)            │
+                    └──────────────────────────────────────────────────────────────────────┘
 ```
 
-As camadas:
+The layers:
 
-1. **Entrada** (`app`, `cli`, `commands`, `interactive`): interpreta argumentos, pede
-   confirmações e transforma resultados em códigos de saída. O menu interativo não tem lógica
-   própria: monta a linha de comando equivalente, mostra ao usuário e executa por
-   `app::dispatch`, então confirmações e travas são as mesmas da CLI.
-2. **Coleta** (`inventory`, `smart`, `windows_counters`, `events`, `health`): cada fonte vira
-   uma struct serializável. Parsers são funções puras sobre texto JSON, testadas com fixtures reais.
-3. **Testes ativos** (`scan`, `benchmark`, `capacity`): motores genéricos sobre os traits
-   `BlockReader`, `BlockWriter`, `VerifyTarget`/`VerifyFile` (`io.rs`). Não conhecem o Windows,
-   o que permite testá-los com dispositivos simulados que injetam erros, lentidão, timeouts,
-   travamentos e capacidade falsa.
-4. **Análise** (`analysis`, `history`, `journal`): regras independentes que juntam evidências
-   ponderadas de várias fontes; histórico SMART e diário de diagnósticos/mudanças para comparar
-   antes × depois. Detalhes em [`DIAGNOSTICS.md`](DIAGNOSTICS.md).
-5. **Saída** (`ui`, `report`, `store`, `tags`): terminal pt-BR, relatório JSON e HTML
-   autocontido, persistência local dos testes e das tags.
-6. **Plataforma** (`platform`): único ponto com `unsafe`, Win32 e processos externos.
+1. **Entry** (`app`, `cli`, `commands`, `interactive`, `menu`): parses arguments, asks for
+   confirmations and turns results into exit codes. The interactive menu has no logic of its own:
+   it builds the equivalent command line, shows it to the user and runs it through `app::dispatch`,
+   so confirmations and safety checks are the CLI's.
+2. **Collection** (`inventory`, `smart`, `windows_counters`, `events`, `health`): each source becomes a
+   serializable struct. Parsers are pure functions over JSON text, tested with real fixtures.
+3. **Active tests** (`scan`, `benchmark`, `capacity`): generic engines over the `BlockReader`,
+   `BlockWriter`, `VerifyTarget`/`VerifyFile` traits (`io.rs`). They know nothing about Windows, which
+   lets them be tested with simulated devices that inject errors, slowness, timeouts, hangs and fake
+   capacity.
+4. **Analysis** (`analysis`, `history`, `journal`): independent rules that combine weighted evidence
+   from several sources; SMART history and a journal of diagnoses/changes for before × after
+   comparisons. Details in [`DIAGNOSTICS.md`](DIAGNOSTICS.md).
+5. **Output** (`ui`, `report`, `store`, `tags`): localized terminal output, JSON and self-contained HTML
+   report, local storage of tests, tags and settings.
+6. **Platform** (`platform`): the only place with `unsafe`, Win32 and external processes.
 
-## Tipos de dispositivo
+## Languages (`i18n.rs`)
 
-`inventory::infer_device_kind` combina o barramento (`Get-Disk.BusType`), o
-`Win32_DiskDrive.MediaType` ("Fixed hard disk media", "External hard disk media",
-"Removable Media") e o modelo:
+- Two languages: English (default) and Português (Brasil). Every user-facing string is written inline
+  in both: `t("Drive", "Disco")` for static text and `tr!("{n} drives", "{n} discos")` for formatted
+  text. A missing translation is a compile error, and both texts sit next to each other in the code.
+- Technical names stay in English in both languages (SMART, Surface Scan, Benchmark, Sequential Read,
+  Random 4 KiB, QD1, Capacity Verification, LBA, CRC…), so they match documentation and other tools.
+- The language is resolved **before** clap builds the command (help texts are evaluated when the
+  command is built): `--lang` (read from the raw arguments), `DISKDOCTOR_LANG`, `settings.json`, English.
+  clap's own messages are translated afterwards in pt-BR (`app::localize_clap_text`).
+- The active language is a process-wide atomic; tests use a per-thread override (`i18n::scoped`).
+- Logic never depends on translated text: rule ids, severities, `AbortKind`, smartctl's
+  `FAILING_NOW`, canonical benchmark labels and JSON field names are stable. Saved results keep the
+  texts of the language they were produced in; labels known to diskdoctor are re-localized on display.
+- Numbers and dates follow the language (`util::int`, `decimal`, `local_datetime`…).
 
-| Tipo | Como é reconhecido | Rótulo |
+## Interactive mode and flicker-free menus (`menu.rs`)
+
+- Each frame is built as one string and written with a single `write` + flush. A redraw moves the
+  cursor up over the previous frame and clears to the end of the screen: the content above (drive
+  panel, previous results) is never repainted, and the scrollback is kept.
+- Lines are cut to the terminal width minus one column, so nothing wraps and the cursor arithmetic is
+  exact. The size is read again before every frame. If the window got narrower, the previous frame's
+  rows may have been re-wrapped by the terminal; the redraw computes how many rows each line occupies
+  now and moves up that many.
+- Lists taller than the window scroll inside a viewport with "↑ more"/"↓ more" markers.
+- Column layout degrades in steps: full (label, duration class, estimate) → no estimate → compact
+  (duration class before the label). The duration class is always visible.
+- The cursor is hidden while a list is open and shown again when it closes; the Ctrl+C handler restores
+  it too. VT processing is enabled explicitly so it also works with `NO_COLOR`.
+- `menu::render` is a pure function and is unit-tested for widths from 12 to 140 columns. The behavior
+  was also validated in a Windows pseudo console (navigation, shortcuts, submenu + Esc, resize to 48
+  and 120 columns, `q`, Ctrl+C, cursor state, bytes per redraw).
+
+## Device types
+
+`inventory::infer_device_kind` combines the bus (`Get-Disk.BusType`), `Win32_DiskDrive.MediaType`
+("Fixed hard disk media", "External hard disk media", "Removable Media") and the model:
+
+| Type | How it is recognized | Label (en / pt-BR) |
 |---|---|---|
-| Interno | barramento SATA/NVMe/SAS… e mídia fixa | `SSD SATA`, `HD SATA`, `SSD NVMe` |
-| Externo | barramento USB/1394 ou "External hard disk media" | `HD externo USB`, `SSD externo USB`, `Disco externo USB` |
-| Pendrive | "Removable Media" | `Pendrive USB` |
-| Cartão | barramento SD/MMC, ou removível/USB com modelo de leitor (`SD`, `MMC`, `Card`, `Reader`…) | `Cartão de memória` |
+| Internal | SATA/NVMe/SAS… bus and fixed media | `SATA SSD`, `SATA HDD`, `NVMe SSD` / `SSD SATA`, `HD SATA`, `SSD NVMe` |
+| External | USB/1394 bus or "External hard disk media" | `External USB HDD`, `External USB SSD`, `External USB drive` / `HD externo USB`, `SSD externo USB`, `Disco externo USB` |
+| USB flash drive | "Removable Media" | `USB flash drive` / `Pendrive USB` |
+| Memory card | SD/MMC bus, or removable/USB with a reader-like model (`SD`, `MMC`, `Card`, `Reader`…) | `Memory card` / `Cartão de memória` |
 
-Discos externos raramente dizem ao Windows se são HD ou SSD; quando o SMART passa pelo case
-USB, o `rotation_rate` do `smartctl` resolve (0 = SSD).
+External drives rarely tell Windows whether they are HDDs or SSDs; when SMART passes through the USB
+enclosure, smartctl's `rotation_rate` settles it (0 = SSD).
 
-## Verificação de capacidade (estilo f3)
+## Capacity Verification (f3 style)
 
 ```
-diskdoctor ─► create_dir("<X>:\diskdoctor-capacidade-AAAAMMDD-HHMMSS")   (falha se existir)
+diskdoctor ─► create_dir("<X>:\diskdoctor-capacity-YYYYMMDD-HHMMSS")   (fails if it exists)
           ─► CreateFileW("0001.ddcap", CREATE_NEW, NO_BUFFERING | WRITE_THROUGH | OVERLAPPED)
-          ─► grava blocos de 1 MiB: cada 4 KiB = "DDCAPv01" + semente + posição + pseudoaleatório
-          ─► fecha; reabre só para leitura (OPEN_EXISTING, NO_BUFFERING) e confere cada 4 KiB
-          ─► apaga os arquivos que ele mesmo criou e a pasta (remove_dir, nunca recursivo)
+          ─► writes 1 MiB blocks: every 4 KiB = "DDCAPv01" + seed + position + pseudo-random data
+          ─► closes; reopens read-only (OPEN_EXISTING, NO_BUFFERING) and checks every 4 KiB
+          ─► deletes the files it created itself and the folder (remove_dir, never recursive)
 ```
 
-- Pedaço com cabeçalho de **outra posição** = o dispositivo sobrescreveu dados (falso clássico).
-- Pedaço **vazio** ou de outra execução (semente diferente) = gravação perdida; se isso se
-  concentra no fim, é o falso que descarta gravações acima da capacidade real.
-- Corrupção espalhada ou erro de E/S = dispositivo com defeito ou mau contato.
-- Capacidade real estimada = espaço já ocupado + bytes lidos de volta corretamente.
-- O disco do sistema é recusado (encher o espaço livre travaria o Windows).
-- Risco inerente, avisado ao usuário: num dispositivo falso, gravar além da capacidade real pode
-  corromper o que já está nele (o controlador sobrescreve endereços baixos).
+- A chunk with the header of **another position** = the device overwrote data (classic fake).
+- An **empty** chunk or one from another run (different seed) = lost write; if that concentrates at the
+  end, it is the fake that drops writes past the real capacity.
+- Scattered corruption or I/O errors = defective device or poor contact.
+- Estimated real capacity = space already used + bytes read back correctly.
+- The system drive is refused (filling its free space would freeze Windows).
+- Writing requires typing `WRITE` (the same word in every language).
+- Inherent risk, told to the user: on a fake device, writing past the real capacity can corrupt what is
+  already on it (the controller overwrites low addresses).
 
-## Tags e histórico
+## Tags, settings and history
 
-- `tags.json`: fingerprint → tags. `--disk` aceita número ou tag (`tags::DiskRef`); uma tag
-  precisa estar em um único disco para ser usada como seletor e não pode ser só dígitos.
-- `journal\<fp>.jsonl`: diagnósticos (`health`/`report`) e mudanças (`history note`). A última
-  mudança vira o ponto de corte: eventos anteriores não entram no veredito, e o crescimento dos
-  contadores SMART é medido a partir dela. `journal::compare` compara janelas de mesma duração
-  antes e depois (até 14 dias de cada lado).
+- `tags.json`: fingerprint → tags. `--disk` takes a number or a tag (`tags::DiskRef`); a tag must be on
+  a single drive to work as a selector and cannot be digits only.
+- `settings.json`: the saved interface language.
+- `journal\<fp>.jsonl`: diagnoses (`health`/`report`) and changes (`history note`). The latest change
+  becomes the cutoff: earlier events do not count toward the verdict, and SMART counter growth is
+  measured from it. `journal::compare` compares windows of the same length before and after (up to 14
+  days on each side).
 
-## Por que Rust (e não Node.js)
+## Why Rust (and not Node.js)
 
-O objetivo central é diagnosticar **travamentos e timeouts**. Para isso a ferramenta precisa:
+The core goal is diagnosing **hangs and timeouts**. For that the tool must:
 
-- impor **tempo limite por leitura** e **cancelar de verdade** uma E/S presa (`CancelIoEx`).
-  No Node, a leitura ocupa uma thread do pool do libuv, que fica presa e não pode ser abortada;
-- ler **sem o cache do Windows** (`FILE_FLAG_NO_BUFFERING`), o que exige buffer alinhado ao
-  setor. Em Rust é trivial (`Layout` alinhado a 4096); no Node não há garantia;
-- chamar `DeviceIoControl` (capacidade, setor lógico e físico) sem addon nativo;
-- gerar um `.exe` único, sem runtime, fácil de levar para a máquina com problema.
+- enforce a **timeout per read** and **really cancel** a stuck I/O (`CancelIoEx`). In Node, the read
+  occupies a libuv pool thread, which gets stuck and cannot be aborted;
+- read **without the Windows cache** (`FILE_FLAG_NO_BUFFERING`), which requires a sector-aligned
+  buffer. In Rust it is trivial (`Layout` aligned to 4096); Node gives no guarantee;
+- call `DeviceIoControl` (capacity, logical and physical sector) without a native addon;
+- ship as a single `.exe`, with no runtime, easy to take to the machine with the problem.
 
-## Como o teste de leitura acessa o disco
+## How the Surface Scan accesses the drive
 
 ```
 diskdoctor ─► CreateFileW("\\.\PhysicalDriveN", GENERIC_READ, NO_BUFFERING | OVERLAPPED)
-          ─► disk.sys (driver de classe) ─► partmgr ─► storport + miniport
-             (storahci / stornvme / iaStorAC / ...) ─► controladora ─► cabo/slot ─► disco
+          ─► disk.sys (class driver) ─► partmgr ─► storport + miniport
+             (storahci / stornvme / iaStorAC / ...) ─► controller ─► cable/slot ─► drive
 ```
 
-- **Somente leitura garantida pelo SO**: o handle é aberto só com `GENERIC_READ`.
-- **Alinhamento**: buffer alinhado a 4096 B; offsets e tamanhos múltiplos do setor lógico.
-- **Tempo limite**: cada leitura é sobreposta; `GetOverlappedResultEx` espera até `--timeout-ms`.
-  Se estourar, `CancelIoEx` cancela e a leitura conta como **timeout**. Se nem o cancelamento
-  conclui em 120 s, o dispositivo é considerado **travado**: o scan aborta e a memória da E/S
-  é vazada de propósito, porque o kernel ainda pode escrever nela.
-- **Isolamento de setores ruins**: um bloco que falha é dividido ao meio repetidamente até o
-  tamanho do setor físico, com orçamento de releituras. Se as metades lerem bem, o erro foi
-  **transitório**, o que indica comunicação e não mídia.
+- **Read-only guaranteed by the OS**: the handle is opened with `GENERIC_READ` only.
+- **Alignment**: buffer aligned to 4096 B; offsets and sizes are multiples of the logical sector.
+- **Timeout**: each read is overlapped; `GetOverlappedResultEx` waits up to `--timeout-ms`. If it
+  expires, `CancelIoEx` cancels it and the read counts as a **timeout**. If not even the cancel
+  completes within 120 s, the device is considered **hung**: the scan stops and the I/O memory is
+  leaked on purpose, because the kernel may still write to it.
+- **Isolating bad sectors**: a failed block is split in half repeatedly down to the physical sector
+  size, with a re-read budget. If the halves read fine, the error was **transient**, which points to
+  communication rather than the media.
 
-## Limitações técnicas de acesso direto a discos no Windows
+## Technical limitations of direct drive access on Windows
 
-Estas limitações valem para qualquer linguagem: são do sistema operacional e do hardware.
+These apply to any language: they come from the operating system and the hardware.
 
-1. **Privilégio de Administrador.** Abrir `\\.\PhysicalDriveN` e enviar comandos SMART exige
-   elevação. Sem ela: `list` e `events` funcionam; `health` lê só o que o `smartctl` consegue
-   (em alguns SATA, atributos sem limiares nem logs); `scan` e `benchmark` recusam com código 3.
-2. **A pilha de drivers sempre fica no meio.** O que medimos é disco + cabo + controladora +
-   driver. Um erro pode vir de qualquer um deles. Isolar o culpado exige trocar componentes
-   (cabo, porta, slot) e repetir o teste. A análise sinaliza qual hipótese é mais provável.
-3. **O Windows tem o próprio tempo limite** (valor `TimeOutValue` do driver de disco, em geral
-   30–60 s) e reseta o link quando ele estoura (evento 129). Um travamento longo pode virar
-   erro do driver antes do tempo limite do diskdoctor.
-4. **Gravação bruta em volumes montados é bloqueada** desde o Vista. Isso não afeta o
-   diskdoctor, que nunca grava no disco físico; o teste de escrita e a verificação de
-   capacidade usam arquivos novos dentro do sistema de arquivos.
-5. **SMART nem sempre passa.** Controladoras RAID/Intel RST, pontes USB-SATA e hubs podem
-   bloquear comandos ATA/NVMe de passagem. Nesses casos o SMART fica "indisponível" e a análise
-   se apoia em eventos e no scan.
-6. **SSDs remapeiam endereços (FTL).** Um LBA não corresponde a uma posição física fixa, e áreas
-   nunca gravadas ou com TRIM podem ser respondidas sem ler a flash. O scan detecta dados
-   ilegíveis e lentidão, mas não testa todas as células.
-7. **Ler não conserta.** Setores pendentes só são realocados quando regravados. O diskdoctor
-   nunca regrava; essa decisão (com backup) fica com o usuário.
-8. **O disco do sistema compete com o uso normal.** Velocidade e latência oscilam durante o
-   teste; picos isolados não são defeito.
-9. **Log de eventos pode perder o que importa.** Se o disco do sistema congela, o Windows nem
-   sempre consegue gravar o evento. Por isso a correlação usa também reinicializações
-   inesperadas (Kernel-Power 41) e eventos imediatamente anteriores a elas.
-10. **SMART normal não prova saúde.** Muitos discos falham sem alterar atributos. O veredito
-    "sem problemas detectados" sempre vem acompanhado das lacunas (o que não foi verificado).
-11. **Pendrives e cartões não têm SMART**, e muitos cases USB não repassam o do disco. Para eles,
-    o teste de leitura e a verificação de capacidade são as fontes de diagnóstico.
-12. **A verificação de capacidade testa só o espaço livre** e depende do sistema de arquivos;
-    detectar falsificação exige preencher quase todo o espaço livre (o padrão sem `--size`).
+1. **Administrator privilege.** Opening `\\.\PhysicalDriveN` and sending SMART commands requires
+   elevation. Without it: `list` and `events` work; `health` reads only what `smartctl` can (on some
+   SATA drives, attributes without thresholds or logs); `scan` and `benchmark` refuse with code 3.
+2. **The driver stack is always in the middle.** What is measured is drive + cable + controller +
+   driver. An error can come from any of them. Isolating the culprit requires swapping components
+   (cable, port, slot) and repeating the test. The analysis says which hypothesis is more likely.
+3. **Windows has its own timeout** (the disk driver's `TimeOutValue`, usually 30–60 s) and resets the
+   link when it expires (event 129). A long hang may become a driver error before the diskdoctor
+   timeout.
+4. **Raw writes to mounted volumes are blocked** since Vista. That does not affect diskdoctor, which
+   never writes to the physical drive; the write test and Capacity Verification use new files inside
+   the file system.
+5. **SMART does not always pass through.** RAID/Intel RST controllers, USB-SATA bridges and hubs can
+   block ATA/NVMe pass-through commands. SMART is then "unavailable" and the analysis relies on events
+   and the Surface Scan.
+6. **SSDs remap addresses (FTL).** An LBA has no fixed physical position, and areas never written or
+   TRIMmed may be answered without reading the flash. The Surface Scan detects unreadable data and
+   slowness, but does not test every cell.
+7. **Reading does not repair.** Pending sectors are only reallocated when rewritten. diskdoctor never
+   rewrites; that decision (with a backup) is the user's.
+8. **The system drive competes with normal use.** Speed and latency vary during the test; isolated
+   spikes are not a defect.
+9. **The event log can miss what matters.** If the system drive freezes, Windows cannot always write the
+   event. That is why the correlation also uses unexpected reboots (Kernel-Power 41) and the events
+   right before them.
+10. **Normal SMART does not prove health.** Many drives fail without changing attributes. The
+    "no problems detected" verdict always comes with the gaps (what was not checked).
+11. **USB flash drives and memory cards have no SMART**, and many USB enclosures do not pass the drive's
+    through. For them, the Surface Scan and Capacity Verification are the diagnostic sources.
+12. **Capacity Verification only tests free space** and depends on the file system; detecting a fake
+    requires filling almost all the free space (the default without `--size`).
 
-## Persistência e privacidade
+## Storage and privacy
 
-- Seriais aparecem só mascarados (`S3Z*********1234`). Resultados, histórico, diário e tags
-  usam um `fingerprint` (hash FNV-1a de modelo+serial) para reconhecer o mesmo disco entre
-  execuções, mesmo que o número do disco mude.
-- Tudo fica local em `%LOCALAPPDATA%\diskdoctor`; nada é enviado para a rede.
-- O relatório inclui o nome do computador e os modelos dos discos.
-- As fixtures de teste vêm de uma máquina real com seriais, GUIDs de volume e rótulos trocados
-  por valores fictícios. Ao criar novas, anonimize do mesmo jeito.
+- Serials appear masked only (`S3Z*********1234`). Results, history, journal and tags use a
+  `fingerprint` (FNV-1a hash of model+serial) to recognize the same drive across runs, even if the drive
+  number changes.
+- Everything stays local in `%LOCALAPPDATA%\diskdoctor`; nothing is sent over the network.
+- The report includes the computer name and the drive models.
+- The test fixtures come from a real machine with serials, volume GUIDs and labels replaced by
+  fictitious values. Anonymize new ones the same way.

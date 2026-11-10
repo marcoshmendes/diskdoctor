@@ -1,15 +1,17 @@
-//! Stubs para SOs que não são Windows: permitem compilar e testar a lógica.
+//! Stubs for operating systems other than Windows: let the logic build and be tested.
 
 use super::OpenError;
 use crate::io::{BlockReader, BlockWriter, IoOutcome, VerifyFile, VerifyTarget};
 use std::path::Path;
 use std::time::Duration;
 
+const WINDOWS_ONLY: &str = "Windows only";
+
 pub struct CapacityDir;
 
 impl CapacityDir {
     pub fn create(_parent: &Path, _max_io: u32) -> std::io::Result<Self> {
-        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "somente Windows"))
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, WINDOWS_ONLY))
     }
     pub fn dir(&self) -> &Path {
         Path::new("")
@@ -28,12 +30,14 @@ impl VerifyTarget for CapacityDir {
     }
 }
 
+pub fn enable_virtual_terminal() {}
+
 pub fn is_elevated() -> bool {
     false
 }
 
 pub fn win32_error_message(code: u32) -> String {
-    format!("erro {code}")
+    format!("error {code}")
 }
 
 pub fn resolve_volume_device(_volume_path: &str) -> Option<String> {
@@ -74,7 +78,7 @@ pub struct TempBenchFile;
 
 impl TempBenchFile {
     pub fn create(_dir: &Path, _size: u64, _max_io: u32) -> std::io::Result<Self> {
-        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "somente Windows"))
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, WINDOWS_ONLY))
     }
     pub fn path(&self) -> &Path {
         Path::new("")
@@ -94,9 +98,9 @@ impl BlockWriter for TempBenchFile {
 }
 
 pub fn relaunch_as_admin(_args: &str) -> Result<(), String> {
-    Err("somente Windows".into())
+    Err(WINDOWS_ONLY.into())
 }
 
 pub fn open_path(_path: &Path) -> Result<(), String> {
-    Err("somente Windows".into())
+    Err(WINDOWS_ONLY.into())
 }

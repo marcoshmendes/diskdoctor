@@ -1,13 +1,14 @@
-//! Integração com `smartctl` (smartmontools) e parsing do JSON (`--json=c`).
+//! `smartctl` (smartmontools) integration and parsing of its JSON (`--json=c`).
 //!
-//! Segurança: só executamos consultas. [`ensure_read_only_args`] rejeita qualquer
-//! argumento que inicie autoteste, altere configuração SMART ou grave no disco,
-//! e é chamado antes de toda execução.
+//! Safety: only queries are run. [`ensure_read_only_args`] rejects any argument that
+//! starts a self-test, changes SMART settings or writes to the drive, and it is called
+//! before every run.
 //!
-//! Mapeamento de dispositivos no Windows: o smartctl nomeia `\\.\PhysicalDriveN`
-//! como `/dev/sdX` (a = 0, b = 1, ..., z = 25, aa = 26...). O tipo (`ata`, `sat`,
-//! `nvme`...) vem de `smartctl --scan`.
+//! Device mapping on Windows: smartctl names `\\.\PhysicalDriveN` as `/dev/sdX`
+//! (a = 0, b = 1, ..., z = 25, aa = 26...). The type (`ata`, `sat`, `nvme`...) comes from
+//! `smartctl --scan`.
 
+use crate::i18n::t;
 use crate::platform::process::run_with_timeout;
 use crate::util::mask_serial;
 use anyhow::{Result, bail};
@@ -41,11 +42,11 @@ pub struct PhyCounter {
     pub value: u64,
 }
 
-/// Dados SMART normalizados (ATA e NVMe) de um disco.
+/// Normalized SMART data (ATA and NVMe) of a drive.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct SmartReport {
     pub disk_number: u32,
-    /// `true` se obtivemos dados SMART utilizáveis.
+    /// `true` if usable SMART data was obtained.
     pub available: bool,
     pub source: String,
     pub device: Option<String>,
@@ -56,11 +57,11 @@ pub struct SmartReport {
     pub serial_masked: Option<String>,
     pub firmware: Option<String>,
     pub capacity_bytes: Option<u64>,
-    /// RPM informado pelo disco; 0 = SSD. Usado para saber se um disco externo é HD ou SSD.
+    /// RPM reported by the drive; 0 = SSD. Tells whether an external drive is an HDD or an SSD.
     #[serde(default)]
     pub rotation_rate: Option<u32>,
     pub smart_enabled: Option<bool>,
-    /// Avaliação geral do próprio disco (PASSED/FAILED).
+    /// The drive's own overall assessment (PASSED/FAILED).
     pub overall_passed: Option<bool>,
     pub temperature_c: Option<i64>,
     pub temperature_max_c: Option<i64>,
@@ -79,19 +80,19 @@ pub struct SmartReport {
     pub reported_uncorrectable: Option<u64>,
     pub grown_bad_blocks: Option<u64>,
     pub program_erase_failures: Option<u64>,
-    /// Atributo 199 (UDMA/SATA CRC): erros no link SATA (cabo/conector/porta).
+    /// Attribute 199 (UDMA/SATA CRC): errors on the SATA link (cable/connector/port).
     pub interface_crc_errors: Option<u64>,
-    /// Outros contadores "CRC" específicos do fabricante (ex.: 218 em controladores Phison).
+    /// Other vendor-specific "CRC" counters (e.g. 218 on Phison controllers).
     pub vendor_crc_errors: Option<u64>,
-    /// Atributo 168 (SATA PHY errors) quando existir.
+    /// Attribute 168 (SATA PHY errors) when present.
     pub sata_phy_errors: Option<u64>,
-    /// Soma dos contadores de erro de FIS/CRC do log SATA Phy (desde a última energização).
+    /// Sum of the FIS/CRC error counters of the SATA Phy log (since the last power-on).
     pub phy_interface_errors: Option<u64>,
-    /// COMRESETs desde a energização (reinicializações do link).
+    /// COMRESETs since power-on (link resets).
     pub phy_link_resets: Option<u64>,
     pub command_timeouts: Option<u64>,
     pub end_to_end_errors: Option<u64>,
-    /// NVMe: erros de integridade de mídia/dados.
+    /// NVMe: media/data integrity errors.
     pub media_errors: Option<u64>,
     pub error_log_entries: Option<u64>,
     pub nvme_critical_warning: Option<u64>,
@@ -100,6 +101,7 @@ pub struct SmartReport {
     pub self_test_failures: Option<u64>,
     pub phy_counters: Vec<PhyCounter>,
     pub attributes: Vec<SmartAttribute>,
+    /// `"<id> <name> (FAILING_NOW)"` or `"<id> <name> (In_the_past)"`, as smartctl names them.
     pub failing_attributes: Vec<String>,
     pub error_log_samples: Vec<String>,
     pub exit_status: Option<i64>,
@@ -117,7 +119,7 @@ impl SmartReport {
         self.protocol.as_deref().map(|p| p.eq_ignore_ascii_case("nvme")).unwrap_or(false)
     }
 
-    /// Contadores numéricos usados no histórico (ver `history`).
+    /// Numeric counters used by the history (see `history`).
     pub fn counters(&self) -> BTreeMap<String, u64> {
         let pairs = [
             ("reallocated_sectors", self.reallocated_sectors),
@@ -142,16 +144,16 @@ impl SmartReport {
 }
 
 // ---------------------------------------------------------------------------
-// Execução do smartctl
+// Running smartctl
 // ---------------------------------------------------------------------------
 
-/// Nome de dispositivo do smartctl para `\\.\PhysicalDriveN`.
+/// smartctl device name for `\\.\PhysicalDriveN`.
 pub fn device_name_for_disk(n: u32) -> String {
     let letter = |i: u32| char::from(b'a' + i as u8);
     if n < 26 { format!("/dev/sd{}", letter(n)) } else { format!("/dev/sd{}{}", letter((n - 26) / 26), letter((n - 26) % 26)) }
 }
 
-/// Argumentos da consulta (somente leitura).
+/// Query arguments (read-only).
 pub fn build_query_args(device: &str, device_type: Option<&str>) -> Vec<String> {
     let mut args = vec!["-x".to_string(), "--json=c".to_string()];
     if let Some(t) = device_type.filter(|t| !t.is_empty()) {
@@ -162,24 +164,23 @@ pub fn build_query_args(device: &str, device_type: Option<&str>) -> Vec<String> 
     args
 }
 
-/// Rejeita argumentos que iniciem testes, alterem configuração ou gravem dados.
+/// Rejects arguments that start tests, change settings or write data.
 pub fn ensure_read_only_args(args: &[String]) -> Result<()> {
     const FORBIDDEN_LONG: &[&str] =
         &["--test", "--captive", "--abort", "--smart", "--offlineauto", "--saveauto", "--set", "--log=sataphy,reset", "--log-reset"];
     const FORBIDDEN_SHORT: &[&str] = &["-t", "-C", "-X", "-s", "-o", "-S", "-g"];
     for a in args {
         let lower = a.to_ascii_lowercase();
-        if FORBIDDEN_LONG.iter().any(|f| lower == *f || lower.starts_with(&format!("{f}="))) || lower.contains("reset") {
-            bail!("argumento proibido para o smartctl (somente leitura): {a}");
-        }
-        if FORBIDDEN_SHORT.iter().any(|f| a == f || (a.starts_with(f) && a.len() > f.len() && !a.starts_with("--"))) {
-            bail!("argumento proibido para o smartctl (somente leitura): {a}");
+        let forbidden = FORBIDDEN_LONG.iter().any(|f| lower == *f || lower.starts_with(&format!("{f}="))) || lower.contains("reset")
+            || FORBIDDEN_SHORT.iter().any(|f| a == f || (a.starts_with(f) && a.len() > f.len() && !a.starts_with("--")));
+        if forbidden {
+            bail!(tr!("argument not allowed for smartctl (read-only): {a}", "argumento proibido para o smartctl (somente leitura): {a}"));
         }
     }
     Ok(())
 }
 
-/// Executor do smartctl com tipos de dispositivo detectados por `--scan`.
+/// smartctl runner with the device types detected by `--scan`.
 #[derive(Debug, Clone)]
 pub struct Smartctl {
     pub path: PathBuf,
@@ -188,7 +189,7 @@ pub struct Smartctl {
 }
 
 impl Smartctl {
-    /// Procura o executável: `DISKDOCTOR_SMARTCTL`, PATH e pastas padrão de instalação.
+    /// Looks for the executable: `DISKDOCTOR_SMARTCTL`, PATH and the default install folders.
     pub fn locate() -> Option<PathBuf> {
         if let Some(p) = std::env::var_os("DISKDOCTOR_SMARTCTL").map(PathBuf::from) {
             if p.is_file() {
@@ -209,7 +210,7 @@ impl Smartctl {
             .find(|p| p.is_file())
     }
 
-    /// Localiza e executa `--scan` (rápido, não abre os discos).
+    /// Locates it and runs `--scan` (fast, does not open the drives).
     pub fn detect() -> Option<Self> {
         let path = Self::locate()?;
         let mut s = Self { path, version: None, device_types: HashMap::new() };
@@ -242,13 +243,13 @@ impl Smartctl {
                     r.source = self.label();
                     r
                 }
-                Err(e) => SmartReport::unavailable(disk_number, &self.label(), format!("saída inesperada do smartctl: {e:#}")),
+                Err(e) => SmartReport::unavailable(disk_number, &self.label(), tr!("unexpected smartctl output: {e:#}", "saída inesperada do smartctl: {e:#}")),
             },
         }
     }
 }
 
-/// Lê `smartctl --scan --json=c`: versão e mapa dispositivo → tipo.
+/// Reads `smartctl --scan --json=c`: version and device → type map.
 pub fn parse_scan_json(json: &str) -> Result<(Option<String>, HashMap<String, String>)> {
     let v: Value = serde_json::from_str(json.trim())?;
     let version = v.pointer("/smartctl/version").and_then(Value::as_array).map(|parts| {
@@ -280,22 +281,28 @@ fn get_bool(v: &Value, ptr: &str) -> Option<bool> {
     v.pointer(ptr).and_then(Value::as_bool)
 }
 
-/// Interpreta os bits do código de saída do smartctl (ver `man smartctl`, RETURN VALUES).
+/// Decodes the bits of the smartctl exit status (see `man smartctl`, RETURN VALUES).
 pub fn decode_exit_status(status: i64) -> Vec<String> {
-    const BITS: [&str; 8] = [
-        "erro de linha de comando do smartctl",
-        "não foi possível abrir o dispositivo (permissão ou dispositivo não suportado)",
-        "algum comando SMART/ATA falhou (comum sem privilégios de Administrador)",
-        "SMART indica FALHA IMINENTE do disco",
-        "atributo de pré-falha abaixo do limite",
-        "algum atributo já esteve abaixo do limite no passado",
-        "o log de erros do dispositivo contém registros",
-        "o log de autoteste contém falhas",
+    let bits: [&str; 8] = [
+        t("smartctl command-line error", "erro de linha de comando do smartctl"),
+        t(
+            "could not open the device (permission or unsupported device)",
+            "não foi possível abrir o dispositivo (permissão ou dispositivo não suportado)",
+        ),
+        t(
+            "some SMART/ATA command failed (common without Administrator privileges)",
+            "algum comando SMART/ATA falhou (comum sem privilégios de Administrador)",
+        ),
+        t("SMART reports the drive is FAILING", "SMART indica FALHA IMINENTE do disco"),
+        t("pre-failure attribute below threshold", "atributo de pré-falha abaixo do limite"),
+        t("some attribute was below threshold in the past", "algum atributo já esteve abaixo do limite no passado"),
+        t("the device error log has entries", "o log de erros do dispositivo contém registros"),
+        t("the self-test log has failures", "o log de autoteste contém falhas"),
     ];
-    BITS.iter().enumerate().filter(|(i, _)| status & (1 << i) != 0).map(|(_, t)| t.to_string()).collect()
+    bits.iter().enumerate().filter(|(i, _)| status & (1 << i) != 0).map(|(_, b)| b.to_string()).collect()
 }
 
-/// Seagate empacota 3 contadores de 16 bits no atributo 188; o total fica nos bits baixos.
+/// Seagate packs three 16-bit counters in attribute 188; the total is in the low bits.
 pub fn normalize_command_timeouts(raw: u64) -> u64 {
     if raw > 0xFFFF { raw & 0xFFFF } else { raw }
 }
@@ -303,10 +310,10 @@ pub fn normalize_command_timeouts(raw: u64) -> u64 {
 static MIN_MAX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"Min/Max\s+(-?\d+)/(-?\d+)").expect("regex"));
 static FIRST_NUMBER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*(\d+)").expect("regex"));
 
-/// Atributos cujo valor normalizado representa vida restante (100 = novo).
+/// Attributes whose normalized value is the remaining life (100 = new).
 const LIFE_LEFT_ATTRS: &[&str] = &["ssd_life_left", "percent_lifetime_remain", "wear_leveling_count", "media_wearout_indicator", "remaining_lifetime_perc"];
 
-/// IDs do log SATA Phy que indicam erro de transmissão (CRC/R_ERR em FIS).
+/// SATA Phy log IDs that indicate a transmission error (CRC/R_ERR in FIS).
 const PHY_ERROR_IDS: &[u32] = &[0x1, 0x3, 0x4, 0x6, 0x7, 0xb, 0xd, 0xf, 0x10, 0x12, 0x13];
 const PHY_COMRESET_ID: u32 = 0xa;
 
@@ -347,7 +354,7 @@ pub fn parse_smartctl_json(disk_number: u32, json: &str) -> Result<SmartReport> 
     r.available_spare_percent = get_u64(&v, "/spare_available/current_percent");
     r.available_spare_threshold = get_u64(&v, "/spare_available/threshold_percent");
 
-    // --- ATA: tabela de atributos ---
+    // --- ATA: attribute table ---
     let mut life_left_fallback: Option<u64> = None;
     for a in v.pointer("/ata_smart_attributes/table").and_then(Value::as_array).into_iter().flatten() {
         let attr = SmartAttribute {
@@ -388,7 +395,7 @@ pub fn parse_smartctl_json(disk_number: u32, json: &str) -> Result<SmartReport> 
             add(&mut r.program_erase_failures, raw);
         }
         if name.starts_with("bad_blk_ct") {
-            // Kingston/Phison: "tardios/precoces" → blocos ruins adquiridos em uso = primeiro número.
+            // Kingston/Phison: "late/early" → bad blocks grown during use = the first number.
             if let Some(c) = FIRST_NUMBER.captures(&attr.raw_string) {
                 add(&mut r.grown_bad_blocks, c[1].parse().unwrap_or(0));
             }
@@ -404,7 +411,8 @@ pub fn parse_smartctl_json(disk_number: u32, json: &str) -> Result<SmartReport> 
             }
         }
         if let Some(when) = &attr.when_failed {
-            let state = if when.eq_ignore_ascii_case("now") || when.contains("FAILING_NOW") { "FALHANDO AGORA" } else { "falhou no passado" };
+            // smartctl's own terms, language-independent (the analysis looks for FAILING_NOW).
+            let state = if when.eq_ignore_ascii_case("now") || when.contains("FAILING_NOW") { "FAILING_NOW" } else { "In_the_past" };
             r.failing_attributes.push(format!("{} {} ({state})", attr.id, attr.name));
         }
         r.attributes.push(attr);
@@ -470,12 +478,14 @@ pub fn parse_smartctl_json(disk_number: u32, json: &str) -> Result<SmartReport> 
 
     r.available = r.model.is_some() || !r.attributes.is_empty() || v.get("nvme_smart_health_information_log").is_some();
     if !r.available {
-        let mut msg = String::from("o smartctl não retornou dados SMART deste disco");
+        let mut msg = String::from(t("smartctl returned no SMART data for this drive", "o smartctl não retornou dados SMART deste disco"));
         if r.exit_status.map(|s| s & 0b10 != 0).unwrap_or(false) {
-            msg.push_str(
+            msg.push_str(t(
+                ": the device could not be opened. Run as Administrator; drives behind RAID/Intel RST \
+                 controllers or USB adapters may not pass SMART commands through",
                 ": não foi possível abrir o dispositivo. Execute como Administrador; discos atrás de controladoras \
                  RAID/Intel RST ou adaptadores USB podem não repassar comandos SMART",
-            );
+            ));
         }
         if let Some(m) = r.messages.first() {
             msg.push_str(&format!(" ({m})"));
@@ -528,7 +538,7 @@ mod tests {
             vec!["-C"],
         ] {
             let args: Vec<String> = bad.iter().map(|s| s.to_string()).collect();
-            assert!(ensure_read_only_args(&args).is_err(), "deveria rejeitar {args:?}");
+            assert!(ensure_read_only_args(&args).is_err(), "should reject {args:?}");
         }
     }
 
@@ -542,6 +552,7 @@ mod tests {
 
     #[test]
     fn parses_real_kingston_120() {
+        let _en = crate::i18n::scoped(crate::i18n::Lang::En);
         let r = parse_smartctl_json(2, KINGSTON_120).unwrap();
         assert!(r.available);
         assert_eq!(r.model.as_deref(), Some("KINGSTON SA400S37120G"));
@@ -551,13 +562,13 @@ mod tests {
         assert_eq!(r.unsafe_shutdowns, Some(219));
         assert_eq!(r.interface_crc_errors, Some(0));
         assert_eq!(r.vendor_crc_errors, Some(0));
-        assert_eq!(r.grown_bad_blocks, Some(0), "Bad_Blk_Ct_Lat/Erl = 0/58 → 0 adquiridos");
+        assert_eq!(r.grown_bad_blocks, Some(0), "Bad_Blk_Ct_Lat/Erl = 0/58 → 0 grown");
         assert_eq!(r.program_erase_failures, Some(0));
         assert_eq!(r.reported_uncorrectable, Some(0));
         assert_eq!(r.wear_used_percent, Some(7));
         assert_eq!(r.temperature_max_c, Some(29));
         assert!(r.serial_masked.as_deref().unwrap().contains('*'));
-        assert!(r.exit_flags.iter().any(|f| f.contains("comando SMART/ATA falhou")));
+        assert!(r.exit_flags.iter().any(|f| f.contains("SMART/ATA command failed")));
         assert!(r.failing_attributes.is_empty());
     }
 
@@ -602,37 +613,51 @@ mod tests {
 
     #[test]
     fn parses_failing_hdd() {
+        let _en = crate::i18n::scoped(crate::i18n::Lang::En);
         let r = parse_smartctl_json(4, HDD_FAILING).unwrap();
         assert_eq!(r.reallocated_sectors, Some(48));
         assert_eq!(r.pending_sectors, Some(8));
         assert_eq!(r.offline_uncorrectable, Some(8));
         assert_eq!(r.reported_uncorrectable, Some(12));
-        assert_eq!(r.command_timeouts, Some(1), "contador Seagate empacotado");
+        assert_eq!(r.command_timeouts, Some(1), "packed Seagate counter");
         assert_eq!(r.unsafe_shutdowns, Some(310));
         assert_eq!(r.error_log_entries, Some(23));
         assert_eq!(r.error_log_samples.len(), 2);
         assert_eq!(r.self_test_failures, Some(1));
         assert_eq!(r.phy_interface_errors, Some(0));
         assert_eq!(r.phy_link_resets, Some(2));
-        assert!(r.exit_flags.iter().any(|f| f.contains("log de erros")));
-        assert!(r.exit_flags.iter().any(|f| f.contains("autoteste")));
+        assert!(r.exit_flags.iter().any(|f| f.contains("error log")));
+        assert!(r.exit_flags.iter().any(|f| f.contains("self-test")));
     }
 
     #[test]
     fn reports_unavailable_when_device_cannot_be_opened() {
         let json = r#"{"smartctl":{"exit_status":2,"messages":[{"string":"Smartctl open device: /dev/sdc failed: Access denied","severity":"error"}]}}"#;
-        let r = parse_smartctl_json(2, json).unwrap();
-        assert!(!r.available);
-        let err = r.error.unwrap();
-        assert!(err.contains("Administrador"));
-        assert!(err.contains("Access denied"));
+        for (lang, word) in [(crate::i18n::Lang::En, "Administrator"), (crate::i18n::Lang::PtBr, "Administrador")] {
+            let _l = crate::i18n::scoped(lang);
+            let r = parse_smartctl_json(2, json).unwrap();
+            assert!(!r.available);
+            let err = r.error.unwrap();
+            assert!(err.contains(word), "{err}");
+            assert!(err.contains("Access denied"));
+        }
+    }
+
+    #[test]
+    fn marks_failing_attributes_with_smartctl_terms() {
+        let json = r#"{"model_name":"X","ata_smart_attributes":{"table":[
+            {"id":5,"name":"Reallocated_Sector_Ct","value":1,"thresh":10,"raw":{"value":900},"when_failed":"now"},
+            {"id":190,"name":"Airflow_Temperature_Cel","value":40,"thresh":45,"raw":{"value":60},"when_failed":"past"}]}}"#;
+        let r = parse_smartctl_json(0, json).unwrap();
+        assert_eq!(r.failing_attributes, vec!["5 Reallocated_Sector_Ct (FAILING_NOW)", "190 Airflow_Temperature_Cel (In_the_past)"]);
     }
 
     #[test]
     fn decodes_exit_bits() {
+        let _en = crate::i18n::scoped(crate::i18n::Lang::En);
         assert!(decode_exit_status(0).is_empty());
         assert_eq!(decode_exit_status(8).len(), 1);
-        assert!(decode_exit_status(8)[0].contains("FALHA IMINENTE"));
+        assert!(decode_exit_status(8)[0].contains("FAILING"));
         assert_eq!(decode_exit_status(192).len(), 2);
     }
 

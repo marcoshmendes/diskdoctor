@@ -1,9 +1,9 @@
-//! Execução de scripts PowerShell que devolvem JSON.
+//! Runs PowerShell scripts that print JSON.
 //!
-//! Usamos o Windows PowerShell 5.1 (`powershell.exe`), presente em todo Windows
-//! 10/11, em vez de exigir o PowerShell 7. O script vai via `-EncodedCommand`
-//! (UTF-16LE em base64) para evitar qualquer problema de aspas/escape, e a saída
-//! é forçada para UTF-8 para preservar acentos das mensagens de evento em pt-BR.
+//! Uses Windows PowerShell 5.1 (`powershell.exe`), present on every Windows 10/11, instead
+//! of requiring PowerShell 7. The script goes through `-EncodedCommand` (UTF-16LE in
+//! base64) to avoid any quoting/escaping problem, and the output is forced to UTF-8 to keep
+//! accented characters in localized event messages.
 
 use super::process::run_with_timeout;
 use anyhow::{Result, bail};
@@ -17,7 +17,7 @@ const PREAMBLE: &str = "$ErrorActionPreference = 'Stop'\n\
 $ProgressPreference = 'SilentlyContinue'\n\
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n";
 
-/// Codifica o script (com o preâmbulo) para `-EncodedCommand`.
+/// Encodes the script (with the preamble) for `-EncodedCommand`.
 pub fn encode_command(script: &str) -> String {
     let full = format!("{PREAMBLE}{script}");
     let bytes: Vec<u8> = full.encode_utf16().flat_map(u16::to_le_bytes).collect();
@@ -34,20 +34,20 @@ fn powershell_exe() -> PathBuf {
     PathBuf::from("powershell.exe")
 }
 
-/// Executa o script e devolve o stdout (esperado: JSON).
+/// Runs the script and returns its stdout (expected: JSON).
 pub fn run_script(script: &str, timeout: Duration) -> Result<String> {
     let encoded = encode_command(script);
     let args = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded.as_str()];
     let out = run_with_timeout(powershell_exe(), &args, timeout)?;
     if out.code != Some(0) {
-        bail!("o PowerShell retornou erro: {}", clean_stderr(&out.stderr));
+        bail!(tr!("PowerShell returned an error: {}", "o PowerShell retornou erro: {}", clean_stderr(&out.stderr)));
     }
     Ok(out.stdout.trim().to_string())
 }
 
 static CLIXML_ERROR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"<S S="Error">(.*?)</S>"#).expect("regex"));
 
-/// Extrai texto legível do stderr (que pode vir em formato CLIXML).
+/// Extracts readable text from stderr (which may come in CLIXML format).
 pub fn clean_stderr(stderr: &str) -> String {
     let text = if stderr.trim_start().starts_with("#< CLIXML") {
         CLIXML_ERROR
@@ -72,13 +72,13 @@ mod tests {
         let units: Vec<u16> = bytes.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
         let text = String::from_utf16(&units).unwrap();
         assert!(text.starts_with("$ErrorActionPreference = 'Stop'"));
-        assert!(text.ends_with("Write-Output 'olá'"));
+        assert!(text.ends_with("Write-Output 'olá'"), "non-ASCII text survives the encoding");
     }
 
     #[test]
     fn cleans_clixml_errors() {
-        let raw = "#< CLIXML\r\n<Objs Version=\"1.1.0.1\"><S S=\"Error\">Falha ao consultar_x000D__x000A_</S><S S=\"Error\">acesso negado_x000D__x000A_</S></Objs>";
-        assert_eq!(clean_stderr(raw), "Falha ao consultar acesso negado");
-        assert_eq!(clean_stderr("erro simples\n"), "erro simples");
+        let raw = "#< CLIXML\r\n<Objs Version=\"1.1.0.1\"><S S=\"Error\">Query failed_x000D__x000A_</S><S S=\"Error\">access denied_x000D__x000A_</S></Objs>";
+        assert_eq!(clean_stderr(raw), "Query failed access denied");
+        assert_eq!(clean_stderr("plain error\n"), "plain error");
     }
 }

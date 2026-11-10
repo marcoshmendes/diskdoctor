@@ -2,6 +2,7 @@
 
 use super::{CollectOptions, Ctx, analyze_collected, collect, exit_for_status, load_disks, print_json, record_diagnoses};
 use crate::cli::ReportArgs;
+use crate::i18n::{self, t};
 use crate::report::{DiagnosticReport, standard_limitations, write_report};
 use crate::store::load_scan_file;
 use crate::ui;
@@ -32,6 +33,7 @@ pub fn run(ctx: &Ctx, args: &ReportArgs) -> Result<u8> {
     let report = DiagnosticReport {
         tool: "diskdoctor".into(),
         version: crate::VERSION.into(),
+        language: i18n::current(),
         generated_at: Utc::now(),
         computer: std::env::var("COMPUTERNAME").ok(),
         elevated: ctx.elevated,
@@ -59,11 +61,11 @@ pub fn run(ctx: &Ctx, args: &ReportArgs) -> Result<u8> {
         for w in &report.warnings {
             ui::warn(w);
         }
-        ui::heading("Resumo");
+        ui::heading(t("Summary", "Resumo"));
         for v in &report.analysis.verdicts {
             println!("  {} — {}: {}", v.label, ui::status_text(v.status), v.headline);
         }
-        ui::heading("Relatório gerado");
+        ui::heading(t("Report written", "Relatório gerado"));
         for p in &paths {
             let shown = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
             println!("  {}", shown.display().to_string().trim_start_matches(r"\\?\"));

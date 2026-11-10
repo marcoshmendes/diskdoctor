@@ -1,15 +1,15 @@
-//! Motor do teste de leitura sequencial (superfície) — somente leitura.
+//! Surface Scan engine: sequential read test of the drive surface (read-only).
 //!
-//! Percorre a faixa pedida em blocos (padrão 1 MiB), medindo a latência de cada
-//! leitura. Quando um bloco falha, faz bisseção (lê metades, depois metades das
-//! metades...) até isolar os setores ilegíveis na granularidade do setor físico,
-//! com orçamento limitado de releituras para não castigar um disco moribundo.
-//! Se a releitura das metades funcionar, o erro é classificado como **transitório**
-//! — típico de problema de comunicação (cabo/controladora) e não de mídia.
+//! Walks the requested range in blocks (default 1 MiB), timing every read. When a block
+//! fails, it bisects it (halves, then halves of halves...) down to the physical sector
+//! size to isolate the unreadable sectors, with a limited re-read budget so a dying drive
+//! is not punished. If re-reading the halves succeeds, the error is classified as
+//! **transient** — typical of a communication problem (cable/controller), not of the media.
 //!
-//! O motor não conhece Windows: recebe qualquer [`BlockReader`]. Testes usam
+//! The engine knows nothing about Windows: it takes any [`BlockReader`]. Tests use
 //! [`crate::io::testing::ScriptedReader`].
 
+use crate::i18n::t;
 use crate::inventory::DiskIdentity;
 use crate::io::{BlockReader, ErrorClass, IoOutcome, classify_error, describe_error, win32};
 use crate::stats::{LatencyRecorder, LatencySummary};
@@ -68,7 +68,7 @@ pub struct ScanIssue {
     pub latency_ms: f64,
     pub error_code: Option<u32>,
     pub error_class: Option<ErrorClass>,
-    /// Erro que desapareceu na releitura (comunicação) em vez de setor ruim.
+    /// Error that went away on re-read (communication) instead of a bad sector.
     #[serde(default)]
     pub transient: bool,
     pub description: String,
@@ -80,14 +80,14 @@ pub struct BadRange {
     pub length: u64,
     pub first_lba: u64,
     pub sector_count: u64,
-    /// `false` = orçamento de releitura acabou; a faixa inteira ficou como suspeita.
+    /// `false` = the re-read budget ran out; the whole range was kept as suspect.
     pub refined: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TimelinePoint {
     pub offset: u64,
-    /// Posição relativa no disco (0–100%).
+    /// Relative position on the drive (0–100%).
     pub percent: f64,
     pub mb_per_s: f64,
     pub max_latency_ms: f64,
@@ -100,22 +100,39 @@ pub struct TimelinePoint {
 pub enum ScanStatus {
     Completed,
     Cancelled,
+    /// Stopped early; the reason is human-readable text in the language of the run
+    /// (the machine-readable kind is in [`ScanMetrics::abort`]).
     Aborted(String),
 }
 
 impl ScanStatus {
     pub fn label(&self) -> String {
         match self {
-            Self::Completed => "concluído".into(),
-            Self::Cancelled => "cancelado pelo usuário".into(),
-            Self::Aborted(r) => format!("interrompido: {r}"),
+            Self::Completed => t("completed", "concluído").into(),
+            Self::Cancelled => t("cancelled by the user", "cancelado pelo usuário").into(),
+            Self::Aborted(r) => tr!("stopped: {r}", "interrompido: {r}"),
         }
     }
+}
+
+/// Why a scan stopped early (stable, language-independent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AbortKind {
+    /// The device stopped responding (not even the cancel completed).
+    Hung,
+    /// An error that makes going on pointless (device gone, access denied…).
+    Fatal,
+    /// Too many consecutive failures.
+    TooManyErrors,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ScanMetrics {
     pub status: ScanStatus,
+    /// Why the scan stopped early, if it did. Absent in results saved before 0.3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abort: Option<AbortKind>,
     pub start_offset: u64,
     pub end_offset: u64,
     pub capacity: u64,
@@ -147,7 +164,22 @@ pub struct ScanMetrics {
     pub timeline: Vec<TimelinePoint>,
 }
 
-/// Resultado persistido de um scan (o que vai para JSON/relatório).
+impl ScanMetrics {
+    /// Why the scan stopped early. Results saved by 0.2.x carry only the (pt-BR) text.
+    pub fn abort_kind(&self) -> Option<AbortKind> {
+        if self.abort.is_some() {
+            return self.abort;
+        }
+        match &self.status {
+            ScanStatus::Aborted(r) if r.contains("parou de responder") => Some(AbortKind::Hung),
+            ScanStatus::Aborted(r) if r.contains("fatal") => Some(AbortKind::Fatal),
+            ScanStatus::Aborted(r) if r.contains("consecutivas") => Some(AbortKind::TooManyErrors),
+            _ => None,
+        }
+    }
+}
+
+/// Saved result of a scan (what goes to JSON/the report).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ScanResult {
     pub tool_version: String,
@@ -168,7 +200,7 @@ pub struct LiveStats {
     pub timeouts: u64,
 }
 
-/// Recebe notificações durante o scan (barra de progresso no CLI).
+/// Receives notifications during the scan (progress bar in the CLI).
 pub trait ScanObserver {
     fn on_progress(&mut self, _stats: &LiveStats) {}
     fn on_issue(&mut self, _issue: &ScanIssue) {}
@@ -177,8 +209,14 @@ pub trait ScanObserver {
 pub struct NoopObserver;
 impl ScanObserver for NoopObserver {}
 
-const HUNG_REASON: &str = "o dispositivo parou de responder (nem o cancelamento da leitura foi concluído). \
-Isso indica travamento do disco, da controladora ou do link";
+fn hung_reason() -> String {
+    tr!(
+        "the device stopped responding (not even the read cancel completed). \
+         This points to a hang of the drive, the controller or the link",
+        "o dispositivo parou de responder (nem o cancelamento da leitura foi concluído). \
+         Isso indica travamento do disco, da controladora ou do link"
+    )
+}
 
 #[derive(Debug, Clone, Default)]
 struct Segment {
@@ -201,7 +239,7 @@ fn push_issue(m: &mut ScanMetrics, max: usize, issue: ScanIssue, observer: &mut 
     }
 }
 
-/// Bisseção de um bloco que falhou. Retorna `true` se o dispositivo travou.
+/// Bisects a failed block. Returns `true` if the device hung.
 #[allow(clippy::too_many_arguments)]
 fn refine<R: BlockReader + ?Sized>(
     reader: &mut R,
@@ -265,7 +303,7 @@ fn merge_ranges(mut v: Vec<(u64, u64, bool)>, logical: u64) -> Vec<BadRange> {
     out
 }
 
-/// Executa o teste de leitura. Nunca grava: só usa [`BlockReader::read_at`].
+/// Runs the scan. Never writes: it only uses [`BlockReader::read_at`].
 pub fn run_scan<R: BlockReader + ?Sized>(reader: &mut R, cfg: &ScanConfig, observer: &mut dyn ScanObserver, cancel: &AtomicBool) -> ScanMetrics {
     let wall = Instant::now();
     let logical = reader.logical_sector_size().max(512) as u64;
@@ -286,8 +324,10 @@ pub fn run_scan<R: BlockReader + ?Sized>(reader: &mut R, cfg: &ScanConfig, obser
     let mut consecutive = 0u32;
     let mut budget = cfg.max_refine_reads;
     let mut status = ScanStatus::Completed;
+    let mut abort = None;
     let mut m = ScanMetrics {
         status: ScanStatus::Completed,
+        abort: None,
         start_offset: start,
         end_offset: end,
         capacity,
@@ -362,7 +402,7 @@ pub fn run_scan<R: BlockReader + ?Sized>(reader: &mut R, cfg: &ScanConfig, obser
                 if lat >= slow {
                     m.slow_blocks += 1;
                     seg.slow += 1;
-                    push_issue(&mut m, cfg.max_recorded_issues, issue(IssueKind::Slow, None, "leitura lenta".into()), observer);
+                    push_issue(&mut m, cfg.max_recorded_issues, issue(IssueKind::Slow, None, t("slow read", "leitura lenta").into()), observer);
                 }
             }
             IoOutcome::Completed { .. } | IoOutcome::Failed { .. } => {
@@ -375,7 +415,8 @@ pub fn run_scan<R: BlockReader + ?Sized>(reader: &mut R, cfg: &ScanConfig, obser
                 if class == ErrorClass::Fatal {
                     m.error_blocks += 1;
                     push_issue(&mut m, cfg.max_recorded_issues, issue(IssueKind::ReadError, Some(code), describe_error(code)), observer);
-                    status = ScanStatus::Aborted(format!("erro fatal de E/S: {}", describe_error(code)));
+                    status = ScanStatus::Aborted(tr!("fatal I/O error: {}", "erro fatal de E/S: {}", describe_error(code)));
+                    abort = Some(AbortKind::Fatal);
                     break;
                 }
                 consecutive += 1;
@@ -395,14 +436,15 @@ pub fn run_scan<R: BlockReader + ?Sized>(reader: &mut R, cfg: &ScanConfig, obser
                         let hung = refine(reader, offset, len, physical, timeout, &mut budget, &mut m.refine_reads, cancel, &mut bad);
                         if hung {
                             push_issue(&mut m, cfg.max_recorded_issues, entry, observer);
-                            status = ScanStatus::Aborted(HUNG_REASON.into());
+                            status = ScanStatus::Aborted(hung_reason());
+                            abort = Some(AbortKind::Hung);
                             offset += len;
                             break;
                         }
                         if bad.len() == before {
                             m.transient_errors += 1;
                             entry.transient = true;
-                            entry.description.push_str(" — releitura bem-sucedida (erro transitório)");
+                            entry.description.push_str(t(" — re-read succeeded (transient error)", " — releitura bem-sucedida (erro transitório)"));
                         }
                     } else {
                         bad.push((offset, len, false));
@@ -415,15 +457,20 @@ pub fn run_scan<R: BlockReader + ?Sized>(reader: &mut R, cfg: &ScanConfig, obser
                 consecutive += 1;
                 m.timeout_blocks += 1;
                 segments[seg_idx].errors += 1;
-                let text = format!("leitura não concluiu em {} ms e foi cancelada", cfg.io_timeout_ms);
+                let text = tr!(
+                    "read did not complete within {} ms and was cancelled",
+                    "leitura não concluiu em {} ms e foi cancelada",
+                    cfg.io_timeout_ms
+                );
                 push_issue(&mut m, cfg.max_recorded_issues, issue(IssueKind::Timeout, None, text), observer);
                 stop = consecutive >= cfg.max_consecutive_errors;
             }
             IoOutcome::Hung { .. } => {
                 m.timeout_blocks += 1;
                 segments[seg_idx].errors += 1;
-                push_issue(&mut m, cfg.max_recorded_issues, issue(IssueKind::Hung, None, HUNG_REASON.into()), observer);
-                status = ScanStatus::Aborted(HUNG_REASON.into());
+                push_issue(&mut m, cfg.max_recorded_issues, issue(IssueKind::Hung, None, hung_reason()), observer);
+                status = ScanStatus::Aborted(hung_reason());
+                abort = Some(AbortKind::Hung);
                 offset += len;
                 break;
             }
@@ -435,14 +482,17 @@ pub fn run_scan<R: BlockReader + ?Sized>(reader: &mut R, cfg: &ScanConfig, obser
         live.timeouts = m.timeout_blocks;
         observer.on_progress(&live);
         if stop {
-            status = ScanStatus::Aborted(format!(
+            status = ScanStatus::Aborted(tr!(
+                "{consecutive} consecutive failures; scan stopped to avoid stressing the drive (adjust with --max-consecutive-errors)",
                 "{consecutive} falhas consecutivas; teste interrompido para não forçar o disco (ajuste com --max-consecutive-errors)"
             ));
+            abort = Some(AbortKind::TooManyErrors);
             break;
         }
     }
 
     m.status = status;
+    m.abort = abort;
     m.bytes_processed = offset.min(end) - start;
     m.bad_ranges = merge_ranges(bad, logical);
     m.bytes_unreadable = m.bad_ranges.iter().map(|r| r.length).sum();
@@ -496,6 +546,7 @@ mod tests {
         let mut r = ScriptedReader::new(64 * MIB);
         let m = run(&mut r, &ScanConfig::default());
         assert_eq!(m.status, ScanStatus::Completed);
+        assert_eq!(m.abort, None);
         assert_eq!(m.blocks_total, 64);
         assert_eq!(m.blocks_ok, 64);
         assert_eq!(m.bytes_read_ok, 64 * MIB);
@@ -504,9 +555,9 @@ mod tests {
         assert!(m.bad_ranges.is_empty());
         assert_eq!(m.latency.count, 64);
         assert!(!m.timeline.is_empty());
-        // 1 MiB a 2 ms ≈ 524 MB/s em cada segmento.
+        // 1 MiB in 2 ms ≈ 524 MB/s in every segment.
         let med = m.median_segment_mb_per_s.unwrap();
-        assert!((med - 524.288).abs() < 1.0, "mediana {med}");
+        assert!((med - 524.288).abs() < 1.0, "median {med}");
     }
 
     #[test]
@@ -525,13 +576,14 @@ mod tests {
         assert_eq!(range.first_lba, bad / 512);
         assert_eq!(range.sector_count, 8);
         assert_eq!(m.bytes_unreadable, 4096);
-        assert!(m.refine_reads <= 2 * 8, "bisseção de 1 MiB/4 KiB deve usar ≤ 16 leituras, usou {}", m.refine_reads);
+        assert!(m.refine_reads <= 2 * 8, "bisecting 1 MiB down to 4 KiB must take ≤ 16 reads, took {}", m.refine_reads);
         assert_eq!(m.issues[0].kind, IssueKind::ReadError);
         assert_eq!(m.issues[0].error_class, Some(ErrorClass::Media));
     }
 
     #[test]
     fn transient_errors_are_not_bad_sectors() {
+        let _en = crate::i18n::scoped(crate::i18n::Lang::En);
         let mut r = ScriptedReader::new(16 * MIB);
         r.transient_bad.push((3 * MIB, 3 * MIB + 512));
         let m = run(&mut r, &ScanConfig::default());
@@ -540,7 +592,7 @@ mod tests {
         assert_eq!(m.device_errors, 1);
         assert!(m.bad_ranges.is_empty());
         assert!(m.issues[0].transient);
-        assert!(m.issues[0].description.contains("transitório"));
+        assert!(m.issues[0].description.contains("transient"));
     }
 
     #[test]
@@ -571,10 +623,11 @@ mod tests {
         let mut r = ScriptedReader::new(16 * MIB);
         r.hang_at = Some(4 * MIB);
         let m = run(&mut r, &ScanConfig::default());
-        assert!(matches!(m.status, ScanStatus::Aborted(ref s) if s.contains("parou de responder")));
+        assert!(matches!(m.status, ScanStatus::Aborted(_)));
+        assert_eq!(m.abort_kind(), Some(AbortKind::Hung));
         assert_eq!(m.blocks_total, 5);
         assert_eq!(m.issues.last().unwrap().kind, IssueKind::Hung);
-        assert_eq!(r.reads.len(), 5, "nenhuma leitura após o travamento");
+        assert_eq!(r.reads.len(), 5, "no read after the hang");
     }
 
     #[test]
@@ -582,7 +635,7 @@ mod tests {
         let mut r = ScriptedReader::new(16 * MIB);
         r.fatal_at = Some((MIB, win32::ERROR_DEVICE_NOT_CONNECTED));
         let m = run(&mut r, &ScanConfig::default());
-        assert!(matches!(m.status, ScanStatus::Aborted(ref s) if s.contains("fatal")));
+        assert_eq!(m.abort_kind(), Some(AbortKind::Fatal));
         assert_eq!(m.blocks_total, 2);
     }
 
@@ -592,11 +645,25 @@ mod tests {
         r.bad_ranges.push((0, 200 * MIB));
         let cfg = ScanConfig { max_consecutive_errors: 8, refine_errors: false, ..Default::default() };
         let m = run(&mut r, &cfg);
-        assert!(matches!(m.status, ScanStatus::Aborted(ref s) if s.contains("consecutivas")));
+        assert_eq!(m.abort_kind(), Some(AbortKind::TooManyErrors));
         assert_eq!(m.error_blocks, 8);
-        assert_eq!(m.bad_ranges.len(), 1, "blocos não refinados contíguos são unidos");
+        assert_eq!(m.bad_ranges.len(), 1, "contiguous unrefined blocks are merged");
         assert_eq!(m.bad_ranges[0].length, 8 * MIB);
         assert!(!m.bad_ranges[0].refined);
+    }
+
+    #[test]
+    fn abort_kind_of_results_saved_by_older_versions() {
+        let mut r = ScriptedReader::new(16 * MIB);
+        let mut m = run(&mut r, &ScanConfig::default());
+        m.status = ScanStatus::Aborted("erro fatal de E/S: dispositivo desconectado ou removido (código 1167)".into());
+        assert_eq!(m.abort_kind(), Some(AbortKind::Fatal));
+        m.status = ScanStatus::Aborted("128 falhas consecutivas; teste interrompido".into());
+        assert_eq!(m.abort_kind(), Some(AbortKind::TooManyErrors));
+        // The new field is optional in JSON: old files still load.
+        let mut json: serde_json::Value = serde_json::to_value(&m).unwrap();
+        json.as_object_mut().unwrap().remove("abort");
+        assert!(serde_json::from_value::<ScanMetrics>(json).is_ok());
     }
 
     #[test]
@@ -606,7 +673,7 @@ mod tests {
         let cfg = ScanConfig { max_refine_reads: 10, max_consecutive_errors: 1000, ..Default::default() };
         let m = run(&mut r, &cfg);
         assert_eq!(m.refine_reads, 10);
-        assert_eq!(m.bytes_unreadable, 64 * MIB, "tudo fica marcado, refinado ou não");
+        assert_eq!(m.bytes_unreadable, 64 * MIB, "everything is marked, refined or not");
         assert!(m.bad_ranges.iter().any(|b| !b.refined));
     }
 
@@ -634,7 +701,7 @@ mod tests {
         let mut r = ScriptedReader::new(10 * MIB + 4096);
         let cfg = ScanConfig { start: 8 * MIB + 100, end: None, ..Default::default() };
         let m = run(&mut r, &cfg);
-        assert_eq!(m.start_offset, 8 * MIB, "início alinhado para baixo ao setor");
+        assert_eq!(m.start_offset, 8 * MIB, "start aligned down to the sector");
         assert_eq!(r.reads, vec![(8 * MIB, MIB as u32), (9 * MIB, MIB as u32), (10 * MIB, 4096)]);
         assert_eq!(m.bytes_read_ok, 2 * MIB + 4096);
     }

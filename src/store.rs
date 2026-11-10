@@ -1,9 +1,9 @@
-//! Persistência local de resultados (scan, benchmark) para o `report` usar depois.
+//! Local storage of results (Surface Scan, Benchmark, Capacity Verification) for the
+//! `report` to use later.
 //!
-//! Pasta padrão: `%LOCALAPPDATA%\diskdoctor` (sobrescreva com `DISKDOCTOR_DATA_DIR`).
-//! Os arquivos têm o serial mascarado e o fingerprint do disco — o `report`
-//! associa resultados ao disco pelo fingerprint, porque o número do disco pode
-//! mudar entre reinicializações.
+//! Default folder: `%LOCALAPPDATA%\diskdoctor` (override with `DISKDOCTOR_DATA_DIR`).
+//! Files carry the masked serial and the drive fingerprint — the `report` links results
+//! to a drive by fingerprint, because the drive number can change between reboots.
 
 use crate::benchmark::BenchmarkResult;
 use crate::capacity::CapacityResult;
@@ -42,10 +42,10 @@ impl ResultStore {
 
     fn save<T: Serialize>(&self, sub: &str, prefix: &str, fingerprint: &str, value: &T) -> Result<PathBuf> {
         let dir = self.base.join(sub);
-        fs::create_dir_all(&dir).with_context(|| format!("não foi possível criar {}", dir.display()))?;
+        fs::create_dir_all(&dir).with_context(|| tr!("could not create {}", "não foi possível criar {}", dir.display()))?;
         let fp: String = fingerprint.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect();
         let path = dir.join(format!("{prefix}-{fp}-{}.json", Utc::now().format("%Y%m%d-%H%M%S")));
-        fs::write(&path, serde_json::to_string_pretty(value)?).with_context(|| format!("não foi possível gravar {}", path.display()))?;
+        fs::write(&path, serde_json::to_string_pretty(value)?).with_context(|| tr!("could not write {}", "não foi possível gravar {}", path.display()))?;
         Ok(path)
     }
 
@@ -71,7 +71,7 @@ impl ResultStore {
         self.save("capacity", "capacity", &r.disk.fingerprint, r)
     }
 
-    /// Resultado mais recente de cada disco (por fingerprint) nos últimos `max_age_days` dias.
+    /// Latest result of each drive (by fingerprint) in the last `max_age_days` days.
     fn latest<T: DeserializeOwned>(&self, sub: &str, max_age_days: i64, key: impl Fn(&T) -> (&DiskIdentity, DateTime<Utc>)) -> Vec<T> {
         let cutoff = Utc::now() - ChronoDuration::days(max_age_days);
         let mut best: HashMap<String, T> = HashMap::new();
@@ -101,7 +101,7 @@ impl ResultStore {
         self.latest("capacity", max_age_days, |r: &CapacityResult| (&r.disk, r.finished_at))
     }
 
-    /// Todos os scans salvos de um disco (para a linha do tempo do `history`).
+    /// Every saved scan of a drive (for the `history` timeline).
     pub fn scans_for(&self, fingerprint: &str) -> Vec<ScanResult> {
         self.load_all::<ScanResult>("scans").into_iter().filter(|r| r.disk.fingerprint == fingerprint).collect()
     }
@@ -112,6 +112,6 @@ impl ResultStore {
 }
 
 pub fn load_scan_file(path: &Path) -> Result<ScanResult> {
-    let text = fs::read_to_string(path).with_context(|| format!("não foi possível ler {}", path.display()))?;
-    serde_json::from_str(&text).with_context(|| format!("{} não é um resultado de scan do diskdoctor", path.display()))
+    let text = fs::read_to_string(path).with_context(|| tr!("could not read {}", "não foi possível ler {}", path.display()))?;
+    serde_json::from_str(&text).with_context(|| tr!("{} is not a diskdoctor Surface Scan result", "{} não é um resultado de Surface Scan do diskdoctor", path.display()))
 }

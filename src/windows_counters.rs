@@ -1,8 +1,8 @@
-//! Contadores de confiabilidade do Windows (`Get-StorageReliabilityCounter`).
+//! Windows reliability counters (`Get-StorageReliabilityCounter`).
 //!
-//! Fonte complementar ao SMART: o próprio Windows consulta o disco e expõe
-//! temperatura, desgaste, erros de leitura/gravação e latências máximas.
-//! Requer Administrador; sem elevação o cmdlet falha e o resultado fica vazio.
+//! A source that complements SMART: Windows itself queries the drive and exposes
+//! temperature, wear, read/write errors and maximum latencies. Requires Administrator;
+//! without elevation the cmdlet fails and the result is empty.
 
 use crate::platform;
 use anyhow::{Context, Result};
@@ -78,20 +78,20 @@ struct Raw {
     start_stop_cycle_count: Option<u64>,
 }
 
-/// Converte o JSON do script em contadores por número de disco.
+/// Converts the script JSON into counters per drive number.
 pub fn parse_counters_json(json: &str) -> Result<HashMap<u32, ReliabilityCounters>> {
     let json = json.trim();
     if json.is_empty() {
         return Ok(HashMap::new());
     }
-    let raw: Vec<Raw> = serde_json::from_str(json).context("JSON de contadores inválido")?;
+    let raw: Vec<Raw> = serde_json::from_str(json).context(crate::i18n::t("invalid counters JSON", "JSON de contadores inválido"))?;
     let nonzero = |v: Option<u64>| v.filter(|&x| x > 0);
     Ok(raw
         .into_iter()
         .filter_map(|r| {
             let n: u32 = r.device_id.trim().parse().ok()?;
             let c = ReliabilityCounters {
-                // 0 °C / 0% significam "não suportado" nesses contadores.
+                // 0 °C / 0% mean "not supported" in these counters.
                 temperature_c: nonzero(r.temperature),
                 temperature_max_c: nonzero(r.temperature_max),
                 wear_percent: r.wear,

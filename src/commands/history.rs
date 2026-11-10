@@ -1,27 +1,28 @@
-//! `diskdoctor history` — linha do tempo de cada disco e comparação antes × depois das
-//! mudanças registradas (`history note`).
+//! `diskdoctor history` — timeline of each drive and before × after comparison of the
+//! recorded changes (`history note`).
 
 use super::{Ctx, load_disks, print_json, select_disk};
 use crate::app::exit;
 use crate::cli::{HistoryAction, HistoryArgs, HistoryNoteArgs};
 use crate::events::{EventKind, StorageEvent, collect_events};
 use crate::history::HistoryStore;
+use crate::i18n::t;
 use crate::inventory::DiskInfo;
-use crate::journal::{Comparison, Effect, Journal, JournalEntry, MAX_COMPARE_DAYS, NoteRecord, compare};
+use crate::journal::{Comparison, Effect, Journal, JournalEntry, MAX_COMPARE_DAYS, NoteRecord, PeriodStats, compare};
 use crate::store::ResultStore;
 use crate::tags::quote_for_cli;
 use crate::ui;
-use crate::util::{decimal, format_bytes, format_duration, format_mbps, int, truncate_chars};
+use crate::util::{decimal, format_bytes, format_duration, format_mbps, int, local_datetime, local_short, truncate_chars};
 use anyhow::{Result, bail};
-use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use comfy_table::Cell;
 use console::style;
 use serde::Serialize;
 use std::time::Duration;
 
-/// Quantas mudanças (as mais recentes) comparar por disco.
+/// How many changes (the latest) to compare per drive.
 const MAX_COMPARISONS: usize = 3;
-/// Limite da consulta de eventos para as comparações.
+/// Limit of the event query used by the comparisons.
 const MAX_EVENT_HOURS: i64 = 24 * 60;
 
 pub fn run(ctx: &Ctx, args: &HistoryArgs) -> Result<u8> {
@@ -31,7 +32,7 @@ pub fn run(ctx: &Ctx, args: &HistoryArgs) -> Result<u8> {
     }
 }
 
-/// Como referir-se ao disco em exemplos de comando: a primeira tag, ou o número.
+/// How to refer to the drive in command examples: its first tag, or its number.
 fn disk_arg(d: &DiskInfo) -> String {
     d.tags.first().map(|t| quote_for_cli(t)).unwrap_or_else(|| d.number.to_string())
 }
@@ -39,7 +40,7 @@ fn disk_arg(d: &DiskInfo) -> String {
 fn note(ctx: &Ctx, a: &HistoryNoteArgs) -> Result<u8> {
     let text = truncate_chars(a.text.join(" ").trim(), 200);
     if text.is_empty() {
-        bail!("descreva a mudança (ex.: \"Troquei o cabo SATA\")");
+        bail!(t("describe the change (e.g. \"Replaced the SATA cable\")", "descreva a mudança (ex.: \"Troquei o cabo SATA\")"));
     }
     let disks = load_disks(ctx)?;
     let disk = select_disk(&disks, &a.disk)?.clone();
@@ -52,25 +53,54 @@ fn note(ctx: &Ctx, a: &HistoryNoteArgs) -> Result<u8> {
         print_json(&rec)?;
         return Ok(exit::OK);
     }
-    println!("{} Mudança registrada — {}", ui::ok_mark(), disk.title());
-    println!("  \"{}\" em {}", rec.text, rec.time.with_timezone(&Local).format("%d/%m/%Y %H:%M"));
+    println!("{} {}", ui::ok_mark(), tr!("Change recorded — {}", "Mudança registrada — {}", disk.title()));
+    println!("  {}", tr!("\"{}\" on {}", "\"{}\" em {}", rec.text, local_datetime(rec.time)));
     println!();
-    println!("  A partir de agora o veredito deste disco considera só o que acontecer depois desta mudança.");
-    println!("  Próximos passos:");
-    println!("    1. use o computador normalmente por 1–3 dias;");
-    println!("    2. rode `diskdoctor health`;");
-    println!("    3. compare com `diskdoctor history --disk {}`.", disk_arg(&disk));
+    println!(
+        "  {}",
+        t(
+            "From now on, this drive's verdict only considers what happens after this change.",
+            "A partir de agora o veredito deste disco considera só o que acontecer depois desta mudança.",
+        )
+    );
+    println!("  {}", t("Next steps:", "Próximos passos:"));
+    println!("    {}", t("1. use the computer normally for 1–3 days;", "1. use o computador normalmente por 1–3 dias;"));
+    println!("    {}", t("2. run `diskdoctor health`;", "2. rode `diskdoctor health`;"));
+    println!("    {}", tr!("3. compare with `diskdoctor history --disk {}`.", "3. compare com `diskdoctor history --disk {}`.", disk_arg(&disk)));
     if !had_diagnosis {
-        ui::note("\nAinda não há diagnóstico salvo deste disco antes da mudança; a comparação vai usar os eventos do Windows, que guardam o histórico recente.");
+        ui::note(t(
+            "\nThere is no saved diagnosis of this drive from before the change yet; the comparison will use the Windows events, which keep the recent history.",
+            "\nAinda não há diagnóstico salvo deste disco antes da mudança; a comparação vai usar os eventos do Windows, que guardam o histórico recente.",
+        ));
     }
     Ok(exit::OK)
 }
 
-/// Linha da linha do tempo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RowKind {
+    Diagnosis,
+    Change,
+    SurfaceScan,
+    CapacityVerification,
+}
+
+impl RowKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Diagnosis => t("Diagnosis", "Diagnóstico"),
+            Self::Change => t("Change", "Mudança"),
+            Self::SurfaceScan => "Surface Scan",
+            Self::CapacityVerification => "Capacity Verification",
+        }
+    }
+}
+
+/// A line of the timeline.
 #[derive(Serialize)]
 struct Row {
     time: DateTime<Utc>,
-    kind: &'static str,
+    kind: RowKind,
     detail: String,
 }
 
@@ -91,17 +121,17 @@ fn timeline(d: &DiskInfo, journal: &Journal, store: &ResultStore, colored: bool)
         .map(|e| match e {
             JournalEntry::Diagnosis(x) => Row {
                 time: x.time,
-                kind: "Diagnóstico",
+                kind: RowKind::Diagnosis,
                 detail: format!(
                     "{} — {}{}",
                     status(x.status),
                     truncate_chars(&x.headline, 90),
-                    if x.io_events > 0 { format!(" · {} eventos de E/S", int(x.io_events)) } else { String::new() }
+                    if x.io_events > 0 { tr!(" · {} I/O events", " · {} eventos de E/S", int(x.io_events)) } else { String::new() }
                 ),
             },
             JournalEntry::Note(n) => Row {
                 time: n.time,
-                kind: "Mudança",
+                kind: RowKind::Change,
                 detail: if colored { style(format!("\"{}\"", n.text)).magenta().bold().to_string() } else { format!("\"{}\"", n.text) },
             },
         })
@@ -110,8 +140,9 @@ fn timeline(d: &DiskInfo, journal: &Journal, store: &ResultStore, colored: bool)
         let m = &s.metrics;
         rows.push(Row {
             time: s.finished_at,
-            kind: "Teste de leitura",
-            detail: format!(
+            kind: RowKind::SurfaceScan,
+            detail: tr!(
+                "{} · {} · errors {} · timeouts {} · slow {}",
                 "{} · {} · erros {} · timeouts {} · lentas {}",
                 m.status.label(),
                 format_mbps(m.avg_mb_per_s),
@@ -124,8 +155,13 @@ fn timeline(d: &DiskInfo, journal: &Journal, store: &ResultStore, colored: bool)
     for c in store.capacity_for(&d.fingerprint) {
         rows.push(Row {
             time: c.finished_at,
-            kind: "Capacidade",
-            detail: format!("{} · {} conferidos", c.metrics.verdict.label(), format_bytes(c.metrics.verified_bytes)),
+            kind: RowKind::CapacityVerification,
+            detail: tr!(
+                "{} · {} verified",
+                "{} · {} conferidos",
+                c.metrics.verdict.label(),
+                format_bytes(c.metrics.verified_bytes)
+            ),
         });
     }
     rows.sort_by_key(|r| r.time);
@@ -143,7 +179,7 @@ fn show(ctx: &Ctx, args: &HistoryArgs) -> Result<u8> {
     let smart_history = HistoryStore::new(&ctx.data_dir);
     let now = Utc::now();
 
-    // Eventos do Windows só são necessários para comparar mudanças.
+    // Windows events are only needed to compare changes.
     let notes: Vec<(u32, Vec<NoteRecord>)> = selected
         .iter()
         .map(|d| {
@@ -156,17 +192,26 @@ fn show(ctx: &Ctx, args: &HistoryArgs) -> Result<u8> {
     let oldest = notes.iter().flat_map(|(_, n)| n.iter().map(|x| x.time)).min();
     let mut events: Vec<StorageEvent> = Vec::new();
     let mut events_ok = false;
-    if let Some(t) = oldest {
-        let since_note = now - t;
+    if let Some(oldest) = oldest {
+        let since_note = now - oldest;
         let window = since_note.min(ChronoDuration::days(MAX_COMPARE_DAYS));
         let hours = ((since_note + window).num_hours() + 1).clamp(1, MAX_EVENT_HOURS);
-        let spinner = (!ctx.json).then(|| ui::spinner(&format!("Consultando eventos do Windows (últimos {} dias) para comparar…", hours / 24 + 1)));
+        let spinner = (!ctx.json).then(|| {
+            ui::spinner(&tr!(
+                "Querying Windows events (last {} days) to compare…",
+                "Consultando eventos do Windows (últimos {} dias) para comparar…",
+                hours / 24 + 1
+            ))
+        });
         match collect_events(hours as u32, 20_000, &disks) {
             Ok(ev) => {
                 events = ev;
                 events_ok = true;
             }
-            Err(e) => ui::warn(&format!("eventos do Windows indisponíveis ({e:#}); a comparação usa só diagnósticos e SMART salvos")),
+            Err(e) => ui::warn(&tr!(
+                "Windows events unavailable ({e:#}); the comparison uses only saved diagnoses and SMART",
+                "eventos do Windows indisponíveis ({e:#}); a comparação usa só diagnósticos e SMART salvos"
+            )),
         }
         if let Some(s) = spinner {
             s.finish_and_clear();
@@ -196,62 +241,78 @@ fn show(ctx: &Ctx, args: &HistoryArgs) -> Result<u8> {
         return Ok(exit::OK);
     }
     for h in &out {
-        ui::heading(&format!("Histórico — {}", h.title));
+        ui::heading(&tr!("History — {}", "Histórico — {}", h.title));
         if h.timeline.is_empty() {
-            println!("  Nada registrado ainda. Rode `diskdoctor health` para começar o histórico deste disco.");
+            println!(
+                "  {}",
+                t(
+                    "Nothing recorded yet. Run `diskdoctor health` to start this drive's history.",
+                    "Nada registrado ainda. Rode `diskdoctor health` para começar o histórico deste disco.",
+                )
+            );
         } else {
-            let mut t = ui::table();
-            t.set_header(vec!["Data", "Evento", "Resultado"]);
+            let mut tb = ui::table();
+            tb.set_header(vec![t("Date", "Data"), t("Event", "Evento"), t("Result", "Resultado")]);
             for r in &h.timeline {
-                let kind = if r.kind == "Mudança" { Cell::new(style(r.kind).magenta().bold().to_string()) } else { Cell::new(r.kind) };
-                t.add_row(vec![Cell::new(r.time.with_timezone(&Local).format("%d/%m/%Y %H:%M").to_string()), kind, Cell::new(&r.detail)]);
+                let kind = if r.kind == RowKind::Change { Cell::new(style(r.kind.label()).magenta().bold().to_string()) } else { Cell::new(r.kind.label()) };
+                tb.add_row(vec![Cell::new(local_datetime(r.time)), kind, Cell::new(&r.detail)]);
             }
-            println!("{t}");
+            println!("{tb}");
         }
         for c in &h.comparisons {
             print_comparison(c, events_ok);
         }
         if h.comparisons.is_empty() {
             let arg = selected.iter().find(|d| d.number == h.number).map(|d| disk_arg(d)).unwrap_or_default();
-            ui::note(&format!("Trocou cabo, porta ou configuração? Registre com: diskdoctor history note --disk {arg} \"Troquei o cabo SATA\""));
+            ui::note(&tr!(
+                "Replaced a cable, port or setting? Record it with: diskdoctor history note --disk {arg} \"Replaced the SATA cable\"",
+                "Trocou cabo, porta ou configuração? Registre com: diskdoctor history note --disk {arg} \"Troquei o cabo SATA\""
+            ));
         }
     }
     Ok(exit::OK)
 }
 
 fn per_day(n: u64, days: f64) -> String {
-    if days <= 0.0 { int(n) } else { format!("{} ({}/dia)", int(n), decimal(n as f64 / days, 1)) }
+    if days <= 0.0 { int(n) } else { tr!("{} ({}/day)", "{} ({}/dia)", int(n), decimal(n as f64 / days, 1)) }
 }
 
 fn print_comparison(c: &Comparison, events_ok: bool) {
     let ago = format_duration(Duration::from_secs_f64(c.hours_since * 3600.0));
     println!(
-        "\n  {} {} — \"{}\" (há {ago})",
-        style("Antes × depois da mudança de").bold(),
-        c.note.time.with_timezone(&Local).format("%d/%m/%Y %H:%M"),
-        c.note.text
+        "\n  {} {} — \"{}\" ({})",
+        style(t("Before × after the change of", "Antes × depois da mudança de")).bold(),
+        local_datetime(c.note.time),
+        c.note.text,
+        tr!("{ago} ago", "há {ago}")
     );
-    let range = |p: &crate::journal::PeriodStats| {
-        format!("{} → {}", p.from.with_timezone(&Local).format("%d/%m %H:%M"), p.to.with_timezone(&Local).format("%d/%m %H:%M"))
-    };
-    let growth = |p: &crate::journal::PeriodStats| {
+    let range = |p: &PeriodStats| format!("{} → {}", local_short(p.from), local_short(p.to));
+    let growth = |p: &PeriodStats| {
         if p.smart_readings < 2 {
-            "sem leituras suficientes".to_string()
+            t("not enough readings", "sem leituras suficientes").to_string()
         } else if p.counter_growth.is_empty() {
-            "nenhum".to_string()
+            t("none", "nenhum").to_string()
         } else {
             p.counter_growth.iter().map(|(k, g)| format!("{k} +{}", int(*g))).collect::<Vec<_>>().join("; ")
         }
     };
-    let status = |p: &crate::journal::PeriodStats| p.status.map(ui::status_text).unwrap_or_else(|| "—".into());
-    let mut t = ui::table();
-    t.set_header(vec!["", "Antes", "Depois"]);
-    t.add_row(vec!["Período".to_string(), range(&c.before), range(&c.after)]);
-    t.add_row(vec!["Eventos de E/S do disco".to_string(), per_day(c.before.io_events, c.before.days()), per_day(c.after.io_events, c.after.days())]);
-    t.add_row(vec!["Reinicializações inesperadas (PC)".to_string(), int(c.before.unexpected_reboots), int(c.after.unexpected_reboots)]);
-    t.add_row(vec!["Último veredito".to_string(), status(&c.before), status(&c.after)]);
-    t.add_row(vec!["Contadores SMART que subiram".to_string(), growth(&c.before), growth(&c.after)]);
-    println!("{t}");
+    let status = |p: &PeriodStats| p.status.map(ui::status_text).unwrap_or_else(|| "—".into());
+    let mut tb = ui::table();
+    tb.set_header(vec!["", t("Before", "Antes"), t("After", "Depois")]);
+    tb.add_row(vec![t("Period", "Período").to_string(), range(&c.before), range(&c.after)]);
+    tb.add_row(vec![
+        t("Drive I/O events", "Eventos de E/S do disco").to_string(),
+        per_day(c.before.io_events, c.before.days()),
+        per_day(c.after.io_events, c.after.days()),
+    ]);
+    tb.add_row(vec![
+        t("Unexpected reboots (PC)", "Reinicializações inesperadas (PC)").to_string(),
+        int(c.before.unexpected_reboots),
+        int(c.after.unexpected_reboots),
+    ]);
+    tb.add_row(vec![t("Last verdict", "Último veredito").to_string(), status(&c.before), status(&c.after)]);
+    tb.add_row(vec![t("SMART counters that rose", "Contadores SMART que subiram").to_string(), growth(&c.before), growth(&c.after)]);
+    println!("{tb}");
     let label = match c.effect {
         Effect::Improved => style(c.effect.label()).green().bold(),
         Effect::Worse => style(c.effect.label()).red().bold(),
@@ -260,6 +321,9 @@ fn print_comparison(c: &Comparison, events_ok: bool) {
     };
     println!("  → {label}: {}", c.summary);
     if !events_ok {
-        ui::warn("sem eventos do Windows nesta comparação; os números de eventos podem estar zerados por isso.");
+        ui::warn(t(
+            "no Windows events in this comparison; the event counts may be zero because of that.",
+            "sem eventos do Windows nesta comparação; os números de eventos podem estar zerados por isso.",
+        ));
     }
 }

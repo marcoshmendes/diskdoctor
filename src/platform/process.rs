@@ -1,4 +1,4 @@
-//! Execução de processos externos com tempo limite.
+//! Runs external processes with a timeout.
 
 use anyhow::{Context, Result, bail};
 use std::ffi::OsStr;
@@ -14,19 +14,30 @@ pub struct ProcessOutput {
     pub stderr: String,
 }
 
-/// Executa `program args...`, capturando stdout/stderr; mata o processo se exceder `timeout`.
-pub fn run_with_timeout<S: AsRef<OsStr>>(program: impl AsRef<OsStr>, args: &[S], timeout: Duration) -> Result<ProcessOutput> {
+/// Runs `program args...`, capturing stdout/stderr; kills the process if it exceeds `timeout`.
+pub fn run_with_timeout<S: AsRef<OsStr>>(
+    program: impl AsRef<OsStr>,
+    args: &[S],
+    timeout: Duration,
+) -> Result<ProcessOutput> {
     let program_name = program.as_ref().to_string_lossy().into_owned();
-    let mut child = Command::new(program.as_ref())
+    let mut command = Command::new(program.as_ref());
+    // Helper queries must not open console windows or steal focus.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let mut child = command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("não foi possível executar {program_name}"))?;
+        .with_context(|| tr!("could not run {program_name}", "não foi possível executar {program_name}"))?;
 
-    let mut stdout = child.stdout.take().expect("stdout capturado");
-    let mut stderr = child.stderr.take().expect("stderr capturado");
+    let mut stdout = child.stdout.take().expect("stdout captured");
+    let mut stderr = child.stderr.take().expect("stderr captured");
     let out_reader = thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = stdout.read_to_end(&mut buf);
@@ -46,7 +57,11 @@ pub fn run_with_timeout<S: AsRef<OsStr>>(program: impl AsRef<OsStr>, args: &[S],
         if started.elapsed() > timeout {
             let _ = child.kill();
             let _ = child.wait();
-            bail!("{program_name} não respondeu em {} s e foi encerrado", timeout.as_secs());
+            bail!(tr!(
+                "{program_name} did not respond within {} s and was stopped",
+                "{program_name} não respondeu em {} s e foi encerrado",
+                timeout.as_secs()
+            ));
         }
         thread::sleep(Duration::from_millis(20));
     };

@@ -2,6 +2,7 @@
 
 use super::{CollectOptions, Ctx, analyze_collected, collect, exit_for_status, load_disks, print_json, record_diagnoses, select_disk};
 use crate::cli::HealthArgs;
+use crate::i18n::t;
 use crate::ui;
 use anyhow::Result;
 use serde_json::json;
@@ -41,7 +42,10 @@ pub fn run(ctx: &Ctx, args: &HealthArgs) -> Result<u8> {
             ui::warn(w);
         }
         ui::print_health(&collected.disks, &collected.health, &analysis);
-        ui::note("Relatório completo (HTML): `diskdoctor report`. Teste de superfície: `diskdoctor scan --disk N` (Administrador).");
+        ui::note(t(
+            "Full HTML report: `diskdoctor report`. Surface Scan: `diskdoctor scan --disk N` (Administrator).",
+            "Relatório completo (HTML): `diskdoctor report`. Surface Scan: `diskdoctor scan --disk N` (Administrador).",
+        ));
     }
     Ok(exit_for_status(analysis.worst_status()))
 }

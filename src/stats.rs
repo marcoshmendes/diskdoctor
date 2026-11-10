@@ -1,8 +1,8 @@
-//! Estatísticas de latência com memória constante.
+//! Latency statistics in constant memory.
 //!
-//! Um scan completo pode ter dezenas de milhões de leituras; em vez de guardar
-//! cada latência, usamos um histograma logarítmico (crescimento de 4% por faixa),
-//! o que dá percentis com erro máximo de ~4% e memória fixa.
+//! A full Surface Scan can make tens of millions of reads; instead of keeping every
+//! latency, a logarithmic histogram (4% growth per bucket) gives percentiles with at most
+//! ~4% error and fixed memory.
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -10,7 +10,7 @@ use std::time::Duration;
 const GROWTH: f64 = 1.04;
 const LOG_BUCKETS: usize = 600;
 
-/// Limites (ms) das faixas exibidas ao usuário; a última faixa é "acima de 500 ms".
+/// Limits (ms) of the buckets shown to the user; the last bucket is "above 500 ms".
 pub const DISPLAY_LIMITS_MS: [u64; 5] = [10, 25, 50, 150, 500];
 
 #[derive(Debug, Clone)]
@@ -54,7 +54,7 @@ impl LatencyRecorder {
         self.count
     }
 
-    /// Percentil aproximado em microssegundos (limite superior da faixa).
+    /// Approximate percentile in microseconds (upper bound of the bucket).
     pub fn percentile_us(&self, p: f64) -> u64 {
         if self.count == 0 {
             return 0;
@@ -115,7 +115,7 @@ pub struct LatencySummary {
 }
 
 impl LatencySummary {
-    /// Quantidade de leituras acima de `ms` usando as faixas de exibição.
+    /// Number of reads above `ms`, using the display buckets.
     pub fn count_above(&self, ms: u64) -> u64 {
         self.buckets.iter().filter(|b| b.upper_ms.map(|u| u > ms).unwrap_or(true)).map(|b| b.count).sum()
     }

@@ -1,101 +1,104 @@
-# Motor de diagnóstico (correlação)
+# Diagnostic engine (correlation)
 
-Código: `src/analysis.rs`. Cada regra junta **evidências** e, se houver ao menos uma, gera um
-**achado** (`Finding`) com severidade, confiança, possíveis causas e recomendações.
+Code: `src/analysis.rs`. Each rule gathers **evidence** and, if there is at least one piece, produces a
+**finding** (`Finding`) with severity, confidence, possible causes and recommendations. Rule ids,
+severities and sources are stable identifiers; titles, evidence texts, causes and recommendations are
+written in the active language (English or Português), and the language never changes a verdict.
 
-## Evidências, pesos e confiança
+## Evidence, weights and confidence
 
-| Peso | Significado | Exemplos |
+| Weight | Meaning | Examples |
 |---|---|---|
-| 1 | fraca | contador CRC do fabricante, poucos timeouts na vida do disco |
-| 2 | moderada | CRC de interface (199), eventos 153 em pequena quantidade |
-| 3 | forte | setores pendentes, evento 129 atribuído, timeouts no scan |
-| 4 | muito forte | atributo SMART falhando agora, aviso crítico NVMe |
-| 5 | definitiva | SMART FAILED, setores ilegíveis confirmados pelo scan, dispositivo travou |
+| 1 | weak | vendor CRC counter, a few timeouts over the drive's life |
+| 2 | moderate | interface CRC (199), a small number of 153 events |
+| 3 | strong | pending sectors, attributed 129 event, Surface Scan timeouts |
+| 4 | very strong | SMART attribute failing now (`FAILING_NOW`), NVMe critical warning |
+| 5 | conclusive | SMART FAILED, unreadable sectors confirmed by the Surface Scan, device hung |
 
-Eventos ganham peso com a quantidade (+1 com 5 ou mais, +2 com 20 ou mais, teto 4) e perdem 1
-quando o disco foi apenas inferido pelo driver.
+Events gain weight with their count (+1 with 5 or more, +2 with 20 or more, capped at 4) and lose 1
+when the drive was only inferred from the driver.
 
-**Confiança** (`confidence_for`):
-- **Alta**: alguma evidência de peso 5, **ou** peso total ≥ 6 vindo de ≥ 2 fontes independentes.
-- **Média**: peso total ≥ 3.
-- **Baixa**: o restante.
+**Confidence** (`confidence_for`):
+- **High**: some evidence of weight 5, **or** total weight ≥ 6 from ≥ 2 independent sources.
+- **Medium**: total weight ≥ 3.
+- **Low**: the rest.
 
-Fontes: SMART, Contadores do Windows, Eventos do Windows, Teste de leitura, Benchmark,
-Histórico SMART, Verificação de capacidade.
+Sources: SMART, Windows counters, Windows events, Surface Scan, Benchmark, SMART history,
+Capacity Verification.
 
-**Mudança registrada** (`diskdoctor history note`): a mais recente de cada disco vira ponto de
-corte. Eventos anteriores a ela não entram nas regras, e o crescimento dos contadores SMART é
-medido a partir dela. O veredito cita a mudança e, se ela tiver menos de 24 h, lista como lacuna
-que ainda é cedo para avaliar.
+**Recorded change** (`diskdoctor history note`): the latest one of each drive becomes the cutoff. Events
+before it do not count toward the rules, and SMART counter growth is measured from it. The verdict
+cites the change (`DiskVerdict::change`) and, if it is less than 24 h old, lists as a gap that it is too
+early to tell.
 
-**Status do disco** = pior severidade entre os achados: Crítico, Alerta, Atenção, ou
-"Sem problemas detectados". Sem nenhuma fonte de dados, o status é "Indeterminado". Achados
-só informativos mantêm "sem problemas".
+**Drive status** = worst severity among the findings: Critical, Warning, Attention, or
+"No problems detected". With no data source at all, the status is "Undetermined". Findings that are
+informational only keep "no problems detected".
 
-## Regras por disco
+## Per-drive rules
 
-| Regra (`rule`) | Título | Principais evidências |
+| Rule (`rule`) | Title | Main evidence |
 |---|---|---|
-| `smart.failed` | O próprio disco reporta falha | `smart_status.passed=false` (5); atributo `when_failed=now` (4); bits do `critical_warning` NVMe |
-| `media.degradation` | Setores ilegíveis ou mídia degradada | 197 pendentes (3), 198 offline (3), 187 (2), 5 realocados (1–2), blocos ruins adquiridos, falhas de programação/apagamento, erros de mídia NVMe (3), autoteste com falha (3), log ATA com UNC (2), **crescimento** no histórico (2–3), contadores do Windows (2), eventos 7/154/52/51, **scan com regiões ilegíveis (5)** |
-| `comm.link` | Falhas de comunicação, timeouts ou travamentos | 199 CRC (2), CRC do fabricante (1), PHY SATA, log SATA Phy (2), 188 timeouts (Info se ≤ 2, 1 se ≥ 3, 2 se ≥ 10), 184 (2), crescimento (2–3), eventos 129/9/11/153/15/157, **padrão de LBAs dos 153**, reset sem disco identificado próximo de eventos do disco (2), scan: timeouts (3), erros transitórios (2), travamento (5), log de erros ATA só com **ICRC** (2; com UNC conta em `media.degradation`). Vira **Crítico** com peso ≥ 8 vindo de ≥ 2 fontes. Se o disco SATA reporta contadores de CRC e **todos estão zerados** apesar dos eventos, adiciona nota (peso 0) e reordena as causas: pausas do próprio disco/firmware e alimentação antes do cabo de dados |
-| `perf.stalls` | Leituras muito lentas ou pausas | scan: leituras > 500 ms (2–3), pico ≥ 150 ms (1), região < 35% da mediana (1); benchmark aleatório ≥ 1 s (2); latência máxima do Windows |
-| `temp.high` | Temperatura elevada | atual ≥ aviso/crítico (HD 50/55, SSD SATA 65/75, NVMe limiares do próprio disco ou 70/80); máxima registrada; minutos NVMe acima do limite |
-| `ssd.wear` | Desgaste avançado | vida consumida ≥ 75% (2) / ≥ 90% (3); reserva ≤ limite (4) |
-| `power.unsafe` | Desligamentos bruscos frequentes | ≥ 50 e ≥ 5% dos ciclos de energia; crescimento ≥ 3 no histórico |
-| `fs.corruption` | Inconsistências no sistema de arquivos | NTFS 55 (Alerta se ≥ 5, senão Atenção), 98 nível ≤ 3, 50/57/140 (falha de flush), 7 (gravação interrompida); cita os volumes e partições afetados |
-| `freeze.correlation` | Problemas do disco antes de travamentos | eventos de E/S do disco nos 30 min anteriores a Kernel-Power 41 (ou 6008 sem 41 no mesmo boot) |
-| `capacity.fake` | Capacidade falsa | verificação de capacidade com dados sobrescritos, ou perdidos concentrados no fim (5, Crítico) |
-| `capacity.errors` | Falhas ao gravar ou ler de volta os dados de teste | dados corrompidos/ilegíveis/perdidos espalhados (5), falhas de gravação (4), verificação interrompida (4) |
+| `smart.failed` | The drive itself reports a failure | `smart_status.passed=false` (5); attribute `when_failed=now` → `FAILING_NOW` (4); in the past → `In_the_past` (1); NVMe `critical_warning` bits |
+| `media.degradation` | Unreadable sectors or degraded media | 197 pending (3), 198 offline (3), 187 (2), 5 reallocated (1–2), grown bad blocks, program/erase failures, NVMe media errors (3), failed self-test (3), ATA log with UNC (2), **growth** in the history (2–3), Windows counters (2), events 7/154/52/51, **Surface Scan with unreadable regions (5)** |
+| `comm.link` | Communication failures, timeouts or device hangs | 199 CRC (2), vendor CRC (1), SATA PHY, SATA Phy log (2), 188 timeouts (Info if ≤ 2, 1 if ≥ 3, 2 if ≥ 10), 184 (2), growth (2–3), events 129/9/11/153/15/157, **LBA pattern of 153 events**, reset with no identified drive close to the drive's events (2), Surface Scan: timeouts (3), transient errors (2), hang (5), fatal stop (4), ATA error log with **ICRC** only (2; with UNC it counts in `media.degradation`). Becomes **Critical** with weight ≥ 8 from ≥ 2 sources. If the SATA drive reports CRC counters and **all are zero** despite the events, adds a note (weight 0) and reorders the causes: the drive's own pauses/firmware and power before the data cable |
+| `perf.stalls` | Very slow reads or device pauses | Surface Scan: reads > 500 ms (2–3), peak ≥ 150 ms (1), region < 35% of the median (1); Benchmark Random 4 KiB ≥ 1 s (2); Windows maximum latency |
+| `temp.high` | High temperature | current ≥ warning/critical (HDD 50/55, SATA SSD 65/75, NVMe the drive's own thresholds or 70/80); recorded maximum; NVMe minutes above the limit |
+| `ssd.wear` | Advanced flash wear | endurance used ≥ 75% (2) / ≥ 90% (3); spare ≤ threshold (4) |
+| `power.unsafe` | Frequent unsafe shutdowns | ≥ 50 and ≥ 5% of power cycles; growth ≥ 3 in the history |
+| `fs.corruption` | File system inconsistencies | NTFS 55 (Warning if ≥ 5, otherwise Attention), 98 level ≤ 3, 50/57/140 (flush failure), 7 (torn write); cites the affected volumes and partitions |
+| `freeze.correlation` | Problems on this drive right before hangs/reboots | drive I/O events in the 30 min before Kernel-Power 41 (or a 6008 without a 41 of the same boot) |
+| `capacity.fake` | Fake capacity | Capacity Verification with overwritten data, or lost data concentrated at the end (5, Critical) |
+| `capacity.errors` | Failures writing or reading back the test data | scattered corrupted/unreadable/lost data (5), write failures (4), verification stopped (4) |
 
-## Antes × depois (`journal::compare`)
+## Before × after (`journal::compare`)
 
-Para cada mudança registrada, compara janelas de mesma duração (o tempo desde a mudança, até 14
-dias) antes e depois dela:
+For each recorded change, compares windows of the same length (the time since the change, up to 14
+days) before and after it:
 
-| Efeito | Regra (eventos de E/S do disco: antes `b`, depois `a`) |
+| Effect | Rule (drive I/O events: before `b`, after `a`) |
 |---|---|
-| Cedo demais | menos de 24 h desde a mudança |
-| Melhorou | `b ≥ 3` e `a ≤ b/5` |
-| Piorou | `a ≥ 1,5·b + 2`, ou `b < 3` e `a ≥ 3` |
-| Sem mudança clara | o restante com `b ≥ 3` |
-| Não dá para medir | `b < 3` e `a = 0` — aí decidem os contadores SMART (crescimento antes e nenhum depois = melhorou) |
+| Too early to tell | less than 24 h since the change |
+| Improved | `b ≥ 3` and `a ≤ b/5` |
+| Got worse | `a ≥ 1.5·b + 2`, or `b < 3` and `a ≥ 3` |
+| No clear change | the rest with `b ≥ 3` |
+| Not measurable | `b < 3` and `a = 0` — then the SMART counters decide (growth before and none after = improved) |
 
-Também mostra reinicializações inesperadas (Kernel-Power 41), o último veredito de cada lado e
-quais contadores SMART cresceram.
+It also shows unexpected reboots (Kernel-Power 41), the last verdict on each side and which SMART
+counters grew.
 
-### Padrão de LBAs nos eventos 153
+### LBA pattern of 153 events
 
-Com 5 ou mais eventos de retry que citam LBA:
-- endereços **distintos espalhados por ≥ 25% do disco** apontam para link, controladora ou firmware;
-- endereços **concentrados** apontam para uma região fraca da mídia.
+With 5 or more retry events that cite an LBA:
+- **distinct addresses spread across ≥ 25% of the drive** point to the link, controller or firmware;
+- **concentrated** addresses point to a weak region of the media.
 
-Os LBAs mais repetidos (3× ou mais) aparecem no texto para serem conferidos no teste de leitura.
+The most repeated LBAs (3× or more) appear in the text so they can be checked with the Surface Scan.
 
-## Achados globais (sem disco)
+## Global findings (no drive)
 
-- `global.controller`: eventos de E/S sem disco identificado (ex.: `storahci/129` com vários discos SATA).
-- `global.whea`: erros WHEA (PCIe/CPU), relevantes para NVMe.
-- `global.unexpected_reboots`: reinicializações inesperadas no período.
+- `global.controller`: I/O events with no identified drive (e.g. `storahci/129` with several SATA drives).
+- `global.whea`: WHEA errors (PCIe/CPU), relevant to NVMe.
+- `global.unexpected_reboots`: unexpected reboots in the period.
 
-## Classificação de eventos (`events.rs`)
+## Event classification (`events.rs`)
 
-| Origem | IDs → tipo |
+| Provider | IDs → kind |
 |---|---|
-| `disk` | 7 bloco ruim · 11 erro de controladora · 15 não pronto · 51 erro de paginação · 52 SMART prevê falha · 153 E/S repetida · 154 E/S falhou por hardware · 157 remoção inesperada |
-| drivers de porta (`storahci`, `stornvme`, `iaStor*`, `amd_sata`, `nvme*`, `storport`...) | 129 reset do dispositivo · 9 tempo limite · 11 controladora · 15 não pronto |
-| `Ntfs` / `Microsoft-Windows-Ntfs` | 55 corrupção · 98 (nível ≤ 3) reparo necessário · 7 gravação interrompida · 50/57/140 falha de flush |
-| `Microsoft-Windows-Kernel-Power` | 41 reinicialização sem desligamento correto |
-| `EventLog` | 6008 desligamento inesperado |
-| `Microsoft-Windows-WHEA-Logger` | 1/17/18/19 erro de hardware |
+| `disk` | 7 bad block · 11 controller error · 15 not ready · 51 paging error · 52 SMART predicts failure · 153 I/O retried · 154 I/O failed due to hardware · 157 surprise removal |
+| port drivers (`storahci`, `stornvme`, `iaStor*`, `amd_sata`, `nvme*`, `storport`...) | 129 device reset · 9 timeout · 11 controller · 15 not ready |
+| `Ntfs` / `Microsoft-Windows-Ntfs` | 55 corruption · 98 (level ≤ 3) repair needed · 7 torn write · 50/57/140 flush failure |
+| `Microsoft-Windows-Kernel-Power` | 41 restart without a clean shutdown |
+| `EventLog` | 6008 unexpected shutdown |
+| `Microsoft-Windows-WHEA-Logger` | 1/17/18/19 hardware error |
 
-**Atribuição ao disco**, em ordem: `\Device\HarddiskN` (exata) → "Disco N" no texto do `disk`
-(exata) → `Volume{guid}` / `\Device\HarddiskVolumeN` / letra (exata) → único disco no
-barramento do driver de porta (inferida).
+**Attribution to a drive**, in order: `\Device\HarddiskN` (exact) → "Disk N"/"Disco N" in the `disk`
+message (exact) → `Volume{guid}` / `\Device\HarddiskVolumeN` / letter (exact) → the only drive on the
+port driver's bus (inferred). Event messages come in the Windows display language, so the patterns
+accept English and Portuguese words.
 
-## Notas sempre presentes
+## Notes always present
 
-- SMART normal não garante saúde.
-- Ausência de eventos não descarta problema no disco do sistema.
-- Execução sem Administrador limita os dados.
+- Normal SMART does not guarantee health.
+- No events does not rule out a problem on the system drive.
+- Running without Administrator limits the data.

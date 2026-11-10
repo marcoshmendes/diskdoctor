@@ -1,27 +1,28 @@
-//! Abstrações de E/S em bloco usadas pelo teste de leitura (`scan`) e pelo `benchmark`.
+//! Block I/O abstractions used by the Surface Scan (`scan`), the Benchmark and the
+//! Capacity Verification.
 //!
-//! Os motores de teste dependem só destes traits, então podem ser testados com
-//! dispositivos simulados ([`testing::ScriptedReader`]) sem tocar em disco real.
-//! As implementações reais ficam em `platform::win` (`RawDisk`, `TempBenchFile`).
+//! The test engines depend only on these traits, so they are tested with simulated
+//! devices ([`testing::ScriptedReader`]) without touching a real drive. The real
+//! implementations live in `platform::win` (`RawDisk`, `TempBenchFile`, `CapacityDir`).
 //!
-//! Invariante de segurança: o disco físico só é exposto como [`BlockReader`].
-//! Não existe implementação de [`BlockWriter`] para disco físico — gravação só
-//! acontece em arquivo temporário novo (`TempBenchFile`).
+//! Safety invariant: the physical drive is only ever exposed as a [`BlockReader`].
+//! There is no [`BlockWriter`] for a physical drive — writes only happen to a new
+//! temporary file (`TempBenchFile`).
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-/// Resultado de uma operação de E/S em bloco.
+/// Result of a block I/O operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IoOutcome {
-    /// Concluída. `bytes` pode ser menor que o pedido (leitura curta).
+    /// Completed. `bytes` may be less than requested (short read).
     Completed { bytes: u32, latency: Duration },
-    /// Falhou com código de erro Win32.
+    /// Failed with a Win32 error code.
     Failed { code: u32, latency: Duration },
-    /// Excedeu o tempo limite configurado e foi cancelada com sucesso.
+    /// Exceeded the configured timeout and was cancelled successfully.
     TimedOut { latency: Duration },
-    /// Excedeu o tempo limite e nem o cancelamento foi concluído: o dispositivo
-    /// (ou a controladora) parou de responder. O leitor fica inutilizável.
+    /// Exceeded the timeout and not even the cancel completed: the device (or the
+    /// controller) stopped responding. The reader is unusable afterwards.
     Hung { latency: Duration },
 }
 
@@ -36,47 +37,47 @@ impl IoOutcome {
     }
 }
 
-/// Dispositivo que só permite leitura (disco físico).
+/// Device that only allows reads (physical drive).
 pub trait BlockReader {
-    /// Capacidade total em bytes.
+    /// Total capacity in bytes.
     fn capacity(&self) -> u64;
-    /// Tamanho do setor lógico (alinhamento mínimo de offset e tamanho).
+    /// Logical sector size (minimum alignment of offset and length).
     fn logical_sector_size(&self) -> u32;
-    /// Tamanho do setor físico (granularidade usada para isolar setores ruins).
+    /// Physical sector size (granularity used to isolate bad sectors).
     fn physical_sector_size(&self) -> u32;
-    /// Maior leitura suportada por chamada.
+    /// Largest read supported per call.
     fn max_io_size(&self) -> u32;
-    /// Lê `len` bytes a partir de `offset` (ambos alinhados ao setor lógico).
+    /// Reads `len` bytes from `offset` (both aligned to the logical sector).
     fn read_at(&mut self, offset: u64, len: u32, timeout: Duration) -> IoOutcome;
 }
 
-/// Destino de gravação de benchmark (somente arquivo temporário novo).
+/// Benchmark write target (only a new temporary file).
 pub trait BlockWriter {
-    /// Tamanho da área de teste em bytes.
+    /// Size of the test area in bytes.
     fn capacity(&self) -> u64;
     fn max_io_size(&self) -> u32;
     fn write_at(&mut self, offset: u64, len: u32, timeout: Duration) -> IoOutcome;
 }
 
-/// Arquivo do teste de capacidade: diferente do [`BlockWriter`], o **conteúdo** importa,
-/// porque cada bloco é gravado com um padrão e conferido na leitura.
+/// Capacity Verification file: unlike [`BlockWriter`], the **content** matters, because
+/// every block is written with a pattern and checked on read-back.
 pub trait VerifyFile {
-    /// Grava `data` (tamanho alinhado ao setor) em `offset` dentro do arquivo.
+    /// Writes `data` (sector-aligned length) at `offset` inside the file.
     fn write_block(&mut self, offset: u64, data: &[u8], timeout: Duration) -> IoOutcome;
-    /// Lê `out.len()` bytes de `offset` dentro do arquivo, sem cache do sistema.
+    /// Reads `out.len()` bytes from `offset` inside the file, bypassing the system cache.
     fn read_block(&mut self, offset: u64, out: &mut [u8], timeout: Duration) -> IoOutcome;
 }
 
-/// Pasta **nova** onde o teste de capacidade cria seus arquivos. Só cria arquivos novos e
-/// só reabre os que ela mesma criou (`index` = ordem de criação).
+/// **New** folder where the Capacity Verification creates its files. It only creates new
+/// files and only reopens the ones it created itself (`index` = creation order).
 pub trait VerifyTarget {
-    /// Cria o arquivo `index` (falha se já existir). `Err` = código de erro Win32.
+    /// Creates file `index` (fails if it already exists). `Err` = Win32 error code.
     fn create_file(&mut self, index: u32) -> Result<Box<dyn VerifyFile>, u32>;
-    /// Reabre, só para leitura, um arquivo criado antes por [`VerifyTarget::create_file`].
+    /// Reopens, read-only, a file created earlier by [`VerifyTarget::create_file`].
     fn open_file(&mut self, index: u32) -> Result<Box<dyn VerifyFile>, u32>;
 }
 
-/// Códigos de erro Win32 relevantes para E/S de disco.
+/// Win32 error codes relevant to drive I/O.
 pub mod win32 {
     pub const ERROR_FILE_NOT_FOUND: u32 = 2;
     pub const ERROR_PATH_NOT_FOUND: u32 = 3;
@@ -105,17 +106,17 @@ pub mod win32 {
     pub const ERROR_DEVICE_REMOVED: u32 = 1617;
 }
 
-/// Classe de um erro de E/S, usada pelo motor de leitura e pela análise.
+/// Class of an I/O error, used by the Surface Scan engine and by the analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorClass {
-    /// O disco reportou dado ilegível (setor defeituoso).
+    /// The drive reported unreadable data (bad sector).
     Media,
-    /// Erro genérico de dispositivo/comunicação.
+    /// Generic device/communication error.
     Device,
-    /// Tempo limite estourado no driver.
+    /// Timeout in the driver.
     Timeout,
-    /// Erro que impede continuar (dispositivo sumiu, acesso negado, parâmetro inválido).
+    /// Error that prevents going on (device gone, access denied, invalid parameter).
     Fatal,
     Other,
 }
@@ -142,33 +143,34 @@ pub fn classify_error(code: u32) -> ErrorClass {
     }
 }
 
-/// Descrição curta em pt-BR de um código de erro Win32.
+/// Short, localized description of a Win32 error code.
 pub fn describe_error(code: u32) -> String {
+    use crate::i18n::t;
     use win32::*;
     let text = match code {
-        ERROR_CRC => "erro de dados (CRC): setor ilegível",
-        ERROR_SECTOR_NOT_FOUND => "setor não encontrado",
-        ERROR_READ_FAULT => "falha de leitura no dispositivo",
-        ERROR_WRITE_FAULT => "falha de gravação no dispositivo",
-        ERROR_IO_DEVICE => "erro de E/S do dispositivo (comunicação ou hardware)",
-        ERROR_DEVICE_HARDWARE_ERROR => "erro de hardware reportado pelo dispositivo",
-        ERROR_GEN_FAILURE => "o dispositivo não está funcionando corretamente",
-        ERROR_SEM_TIMEOUT | ERROR_TIMEOUT => "tempo limite esgotado no driver",
-        ERROR_NOT_READY => "dispositivo não está pronto",
+        ERROR_CRC => t("data error (CRC): unreadable sector", "erro de dados (CRC): setor ilegível"),
+        ERROR_SECTOR_NOT_FOUND => t("sector not found", "setor não encontrado"),
+        ERROR_READ_FAULT => t("device read fault", "falha de leitura no dispositivo"),
+        ERROR_WRITE_FAULT => t("device write fault", "falha de gravação no dispositivo"),
+        ERROR_IO_DEVICE => t("device I/O error (communication or hardware)", "erro de E/S do dispositivo (comunicação ou hardware)"),
+        ERROR_DEVICE_HARDWARE_ERROR => t("hardware error reported by the device", "erro de hardware reportado pelo dispositivo"),
+        ERROR_GEN_FAILURE => t("the device is not working properly", "o dispositivo não está funcionando corretamente"),
+        ERROR_SEM_TIMEOUT | ERROR_TIMEOUT => t("timeout in the driver", "tempo limite esgotado no driver"),
+        ERROR_NOT_READY => t("device not ready", "dispositivo não está pronto"),
         ERROR_DEVICE_NOT_CONNECTED | ERROR_DEV_NOT_EXIST | ERROR_NO_SUCH_DEVICE | ERROR_DEVICE_REMOVED => {
-            "dispositivo desconectado ou removido"
+            t("device disconnected or removed", "dispositivo desconectado ou removido")
         }
-        ERROR_ACCESS_DENIED => "acesso negado",
-        ERROR_INVALID_PARAMETER => "parâmetro inválido (alinhamento de E/S)",
-        ERROR_OPERATION_ABORTED => "operação cancelada",
-        ERROR_HANDLE_EOF => "leitura curta (fim do dispositivo)",
-        ERROR_DISK_FULL | ERROR_HANDLE_DISK_FULL => "disco cheio",
-        _ => return format!("erro do Windows {code}"),
+        ERROR_ACCESS_DENIED => t("access denied", "acesso negado"),
+        ERROR_INVALID_PARAMETER => t("invalid parameter (I/O alignment)", "parâmetro inválido (alinhamento de E/S)"),
+        ERROR_OPERATION_ABORTED => t("operation cancelled", "operação cancelada"),
+        ERROR_HANDLE_EOF => t("short read (end of device)", "leitura curta (fim do dispositivo)"),
+        ERROR_DISK_FULL | ERROR_HANDLE_DISK_FULL => t("disk full", "disco cheio"),
+        _ => return tr!("Windows error {code}", "erro do Windows {code}"),
     };
-    format!("{text} (código {code})")
+    tr!("{text} (code {code})", "{text} (código {code})")
 }
 
-/// Dispositivos simulados para testes automatizados (não usados em produção).
+/// Simulated devices for automated tests (not used in production).
 #[doc(hidden)]
 pub mod testing {
     use super::*;
@@ -179,7 +181,7 @@ pub mod testing {
         offset < end && start < offset + len as u64
     }
 
-    /// Leitor com comportamento roteirizado por faixas de bytes.
+    /// Reader whose behavior is scripted by byte ranges.
     #[derive(Debug, Clone)]
     pub struct ScriptedReader {
         pub capacity: u64,
@@ -187,19 +189,19 @@ pub mod testing {
         pub physical: u32,
         pub max_io: u32,
         pub latency_per_mib: Duration,
-        /// Faixas `[início, fim)` sempre ilegíveis (ERROR_CRC).
+        /// `[start, end)` ranges that are always unreadable (ERROR_CRC).
         pub bad_ranges: Vec<(u64, u64)>,
-        /// Faixas que falham (ERROR_IO_DEVICE) só na primeira leitura que as toca.
+        /// Ranges that fail (ERROR_IO_DEVICE) only on the first read that touches them.
         pub transient_bad: Vec<(u64, u64)>,
-        /// Faixas lentas: latência extra somada.
+        /// Slow ranges: extra latency added.
         pub slow_ranges: Vec<(u64, u64, Duration)>,
-        /// Faixas que estouram o tempo limite.
+        /// Ranges that exceed the timeout.
         pub timeout_ranges: Vec<(u64, u64)>,
-        /// Offset a partir do qual o dispositivo trava.
+        /// Offset from which the device hangs.
         pub hang_at: Option<u64>,
-        /// Offset e código de erro fatal.
+        /// Offset and code of a fatal error.
         pub fatal_at: Option<(u64, u32)>,
-        /// Registro de todas as leituras feitas (offset, tamanho).
+        /// Log of every read made (offset, length).
         pub reads: Vec<(u64, u32)>,
         transient_hit: Vec<bool>,
     }
@@ -239,9 +241,9 @@ pub mod testing {
         }
         fn read_at(&mut self, offset: u64, len: u32, timeout: Duration) -> IoOutcome {
             self.reads.push((offset, len));
-            assert_eq!(offset % self.logical as u64, 0, "offset desalinhado");
-            assert_eq!(len % self.logical, 0, "tamanho desalinhado");
-            assert!(offset + len as u64 <= self.capacity, "leitura além do fim");
+            assert_eq!(offset % self.logical as u64, 0, "misaligned offset");
+            assert_eq!(len % self.logical, 0, "misaligned length");
+            assert!(offset + len as u64 <= self.capacity, "read past the end");
             if let Some(h) = self.hang_at {
                 if overlaps(offset, len, h, h + 1) {
                     return IoOutcome::Hung { latency: timeout * 2 };
@@ -280,7 +282,7 @@ pub mod testing {
         }
     }
 
-    /// Gravador simulado para o benchmark de escrita.
+    /// Simulated writer for the write benchmark.
     #[derive(Debug, Clone)]
     pub struct ScriptedWriter {
         pub capacity: u64,
@@ -305,7 +307,7 @@ pub mod testing {
         }
         fn write_at(&mut self, offset: u64, len: u32, _timeout: Duration) -> IoOutcome {
             self.writes.push((offset, len));
-            assert!(offset + len as u64 <= self.capacity, "gravação além do arquivo temporário");
+            assert!(offset + len as u64 <= self.capacity, "write past the temporary file");
             if let Some((p, code)) = self.fail_at {
                 if overlaps(offset, len, p, p + 1) {
                     return IoOutcome::Failed { code, latency: Duration::from_millis(1) };
@@ -332,9 +334,14 @@ mod tests {
     }
 
     #[test]
-    fn describes_errors_in_portuguese() {
+    fn describes_errors_in_both_languages() {
+        {
+            let _en = crate::i18n::scoped(crate::i18n::Lang::En);
+            assert_eq!(describe_error(23), "data error (CRC): unreadable sector (code 23)");
+            assert_eq!(describe_error(4242), "Windows error 4242");
+        }
+        let _pt = crate::i18n::scoped(crate::i18n::Lang::PtBr);
         assert!(describe_error(23).contains("setor ilegível"));
-        assert!(describe_error(23).contains("23"));
         assert_eq!(describe_error(4242), "erro do Windows 4242");
     }
 }

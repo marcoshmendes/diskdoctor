@@ -1,16 +1,16 @@
-//! Acesso nativo ao Windows (Win32). Todo `unsafe` do projeto fica aqui.
+//! Native Windows access (Win32). Every `unsafe` block of the project lives here.
 //!
-//! Decisões importantes (ver docs/ARCHITECTURE.md):
-//! - O disco físico é aberto com `GENERIC_READ` apenas: o próprio Windows recusa
-//!   qualquer gravação por esse handle. Não há caminho de código que grave no disco.
-//! - `FILE_FLAG_NO_BUFFERING` evita o cache do sistema, então a latência medida é
-//!   a do dispositivo. Exige buffer, offset e tamanho alinhados ao setor; usamos
-//!   buffers alinhados a 4096 bytes.
-//! - E/S sobreposta (`FILE_FLAG_OVERLAPPED`) permite impor tempo limite por
-//!   operação e cancelar com `CancelIoEx` — impossível com leitura síncrona.
-//! - Se nem o cancelamento concluir (dispositivo travado), o handle é marcado como
-//!   "envenenado" e buffer/OVERLAPPED são vazados de propósito: o kernel ainda pode
-//!   escrever neles, e liberar essa memória seria comportamento indefinido.
+//! Key decisions (see docs/ARCHITECTURE.md):
+//! - The physical drive is opened with `GENERIC_READ` only: Windows itself rejects any
+//!   write through that handle. No code path writes to the drive.
+//! - `FILE_FLAG_NO_BUFFERING` bypasses the system cache, so the measured latency is the
+//!   device's. It requires sector-aligned buffers, offsets and sizes; buffers are
+//!   aligned to 4096 bytes.
+//! - Overlapped I/O (`FILE_FLAG_OVERLAPPED`) allows a timeout per operation and a real
+//!   cancel with `CancelIoEx`, which synchronous reads cannot do.
+//! - If not even the cancel completes (hung device), the handle is marked "poisoned" and
+//!   the buffer/OVERLAPPED are leaked on purpose: the kernel may still write to them, and
+//!   freeing that memory would be undefined behavior.
 
 use super::OpenError;
 use crate::io::{BlockReader, BlockWriter, IoOutcome, VerifyFile, VerifyTarget};
@@ -39,7 +39,7 @@ use windows_sys::Win32::System::Ioctl::{
 };
 use windows_sys::Win32::System::Threading::{CreateEventW, GetCurrentProcess, OpenProcessToken};
 
-/// Quanto esperar o cancelamento de uma E/S antes de declarar o dispositivo travado.
+/// How long to wait for an I/O cancel before declaring the device hung.
 const HUNG_WAIT_MS: u32 = 120_000;
 const IOCTL_TIMEOUT_MS: u32 = 15_000;
 const BUFFER_ALIGN: usize = 4096;
@@ -53,7 +53,21 @@ fn last_error() -> u32 {
     unsafe { GetLastError() }
 }
 
-/// O processo atual está elevado (Administrador)?
+/// Turns on VT sequence processing on the console (cursor movement used by the menus).
+/// Windows 10+ supports it; the `console` crate only enables it when colors are on, so
+/// with `NO_COLOR` or `--no-color` the menus would print raw escape codes otherwise.
+pub fn enable_virtual_terminal() {
+    use windows_sys::Win32::System::Console::{ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle, STD_OUTPUT_HANDLE, SetConsoleMode};
+    unsafe {
+        let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        let mut mode = 0;
+        if !handle.is_null() && handle != INVALID_HANDLE_VALUE && GetConsoleMode(handle, &mut mode) != 0 {
+            SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+        }
+    }
+}
+
+/// Is the current process elevated (Administrator)?
 pub fn is_elevated() -> bool {
     unsafe {
         let mut token: HANDLE = null_mut();
@@ -74,7 +88,7 @@ pub fn is_elevated() -> bool {
     }
 }
 
-/// Mensagem do sistema (no idioma do Windows) para um código Win32.
+/// System message (in the Windows display language) for a Win32 code.
 pub fn win32_error_message(code: u32) -> String {
     let mut buf = [0u16; 512];
     let n = unsafe {
@@ -89,12 +103,12 @@ pub fn win32_error_message(code: u32) -> String {
         )
     };
     if n == 0 {
-        return format!("erro {code}");
+        return tr!("error {code}", "erro {code}");
     }
     String::from_utf16_lossy(&buf[..n as usize]).trim().to_string()
 }
 
-/// `\\?\Volume{guid}\` → `\Device\HarddiskVolumeN` (usado para ligar eventos NTFS a discos).
+/// `\\?\Volume{guid}\` → `\Device\HarddiskVolumeN` (links NTFS events to drives).
 pub fn resolve_volume_device(volume_path: &str) -> Option<String> {
     let name = volume_path.trim_start_matches(r"\\?\").trim_end_matches('\\');
     if !name.to_ascii_lowercase().starts_with("volume{") {
@@ -110,7 +124,7 @@ pub fn resolve_volume_device(volume_path: &str) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..end]))
 }
 
-/// Espaço livre disponível para o usuário no volume que contém `dir`.
+/// Free space available to the user on the volume that contains `dir`.
 pub fn free_space_bytes(dir: &Path) -> Option<u64> {
     let w: Vec<u16> = dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
     let mut free = 0u64;
@@ -118,7 +132,7 @@ pub fn free_space_bytes(dir: &Path) -> Option<u64> {
     (ok != 0).then_some(free)
 }
 
-/// Buffer alinhado a 4096 bytes (exigência de `FILE_FLAG_NO_BUFFERING`).
+/// Buffer aligned to 4096 bytes (required by `FILE_FLAG_NO_BUFFERING`).
 struct AlignedBuffer {
     ptr: NonNull<u8>,
     layout: Layout,
@@ -127,7 +141,7 @@ struct AlignedBuffer {
 impl AlignedBuffer {
     fn new(size: usize) -> Self {
         let size = size.max(MIN_BUFFER).next_multiple_of(BUFFER_ALIGN);
-        let layout = Layout::from_size_align(size, BUFFER_ALIGN).expect("layout válido");
+        let layout = Layout::from_size_align(size, BUFFER_ALIGN).expect("valid layout");
         let raw = unsafe { alloc_zeroed(layout) };
         let ptr = NonNull::new(raw).unwrap_or_else(|| std::alloc::handle_alloc_error(layout));
         Self { ptr, layout }
@@ -138,7 +152,7 @@ impl AlignedBuffer {
     fn len(&self) -> usize {
         self.layout.size()
     }
-    /// Preenche com dados pseudoaleatórios (incompressíveis) para o teste de escrita.
+    /// Fills with pseudo-random (incompressible) data for the write test.
     fn fill_pseudo_random(&mut self, seed: u64) {
         let slice = unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len()) };
         let mut rng = crate::util::SplitMix64::new(seed);
@@ -155,7 +169,7 @@ impl Drop for AlignedBuffer {
     }
 }
 
-/// Handle aberto com `FILE_FLAG_OVERLAPPED` + evento + buffer próprio.
+/// Handle opened with `FILE_FLAG_OVERLAPPED`, plus its own event and buffer.
 struct OverlappedHandle {
     handle: HANDLE,
     event: HANDLE,
@@ -191,8 +205,8 @@ impl OverlappedHandle {
         &mut **self.overlapped as *mut OVERLAPPED
     }
 
-    /// Espera a conclusão; em caso de tempo limite cancela e espera o cancelamento.
-    /// Retorna `Ok(bytes)` ou `Err(outcome)` já classificado.
+    /// Waits for completion; on timeout, cancels and waits for the cancel.
+    /// Returns `Ok(bytes)` or an already classified `Err(outcome)`.
     fn wait(&mut self, ov: *mut OVERLAPPED, timeout_ms: u32, start: Instant) -> Result<u32, IoOutcome> {
         let mut transferred = 0u32;
         let done = unsafe { GetOverlappedResultEx(self.handle, ov, &mut transferred, timeout_ms, 0) };
@@ -238,7 +252,7 @@ impl OverlappedHandle {
         }
     }
 
-    /// IOCTL com saída no buffer próprio (que sobrevive mesmo se o dispositivo travar).
+    /// IOCTL whose output goes to the handle's own buffer (which survives a hung device).
     fn ioctl(&mut self, code: u32, input: &[u8], out_len: usize) -> Result<&[u8], u32> {
         if self.poisoned {
             return Err(crate::io::win32::ERROR_NOT_READY);
@@ -278,7 +292,7 @@ impl OverlappedHandle {
 impl Drop for OverlappedHandle {
     fn drop(&mut self) {
         if self.poisoned {
-            // E/S possivelmente ainda pendente no kernel: vazar é a única opção segura.
+            // I/O may still be pending in the kernel: leaking is the only safe option.
             return;
         }
         unsafe {
@@ -294,7 +308,7 @@ fn read_struct<T: Copy>(bytes: &[u8]) -> Option<T> {
     (bytes.len() >= size_of::<T>()).then(|| unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const T) })
 }
 
-/// Disco físico (`\\.\PhysicalDriveN`) aberto **somente para leitura**.
+/// Physical drive (`\\.\PhysicalDriveN`) opened **read-only**.
 pub struct RawDisk {
     io: OverlappedHandle,
     capacity: u64,
@@ -306,7 +320,7 @@ pub struct RawDisk {
 impl RawDisk {
     pub fn open(disk_number: u32, max_io: u32) -> Result<Self, OpenError> {
         let path = wide(&format!(r"\\.\PhysicalDrive{disk_number}"));
-        // GENERIC_READ apenas: o Windows rejeita qualquer gravação feita por este handle.
+        // GENERIC_READ only: Windows rejects any write made through this handle.
         let handle = unsafe {
             CreateFileW(
                 path.as_ptr(),
@@ -330,7 +344,7 @@ impl RawDisk {
             .ok()
             .and_then(read_struct::<GET_LENGTH_INFORMATION>)
             .map(|l| l.Length.max(0) as u64)
-            .ok_or_else(|| OpenError::Other { code: 0, message: "não foi possível obter a capacidade do disco".into() })?;
+            .ok_or_else(|| OpenError::Other { code: 0, message: tr!("could not read the drive capacity", "não foi possível obter a capacidade do disco") })?;
 
         let logical = io
             .ioctl(IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, &[], 1024)
@@ -379,12 +393,12 @@ impl BlockReader for RawDisk {
     }
 }
 
-/// Arquivo temporário **novo** para o benchmark de escrita.
+/// **New** temporary file for the write benchmark.
 ///
-/// - `CREATE_NEW`: falha se o arquivo já existir — nunca sobrescreve nada.
-/// - `FILE_FLAG_DELETE_ON_CLOSE`: o Windows apaga o arquivo quando o handle fecha,
-///   inclusive se o processo for encerrado à força.
-/// - `FILE_FLAG_WRITE_THROUGH` + `NO_BUFFERING`: mede o dispositivo, não o cache.
+/// - `CREATE_NEW`: fails if the file already exists, so nothing is ever overwritten.
+/// - `FILE_FLAG_DELETE_ON_CLOSE`: Windows deletes the file when the handle closes, even
+///   if the process is killed.
+/// - `FILE_FLAG_WRITE_THROUGH` + `NO_BUFFERING`: measures the device, not the cache.
 pub struct TempBenchFile {
     io: OverlappedHandle,
     path: PathBuf,
@@ -434,14 +448,14 @@ impl BlockWriter for TempBenchFile {
     }
 }
 
-/// Arquivo do teste de capacidade (conteúdo gravado e conferido).
+/// Capacity Verification file (content is written and then checked).
 struct VerifyHandle {
     io: OverlappedHandle,
 }
 
 impl VerifyHandle {
-    /// `create = true`: arquivo NOVO (`CREATE_NEW`), leitura+escrita, `WRITE_THROUGH`.
-    /// `create = false`: reabre só para leitura. Sempre `NO_BUFFERING` (sem cache do Windows).
+    /// `create = true`: NEW file (`CREATE_NEW`), read+write, `WRITE_THROUGH`.
+    /// `create = false`: reopens read-only. Always `NO_BUFFERING` (no Windows cache).
     fn open(path: &Path, create: bool, max_io: u32) -> Result<Self, u32> {
         let w: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
         let (access, disposition, extra) =
@@ -460,7 +474,7 @@ impl VerifyHandle {
 impl VerifyFile for VerifyHandle {
     fn write_block(&mut self, offset: u64, data: &[u8], timeout: Duration) -> IoOutcome {
         if self.io.poisoned {
-            // O kernel ainda pode estar usando o buffer: não tocar nele.
+            // The kernel may still be using the buffer: do not touch it.
             return IoOutcome::Hung { latency: Duration::ZERO };
         }
         if data.len() > self.io.buffer.len() {
@@ -480,13 +494,13 @@ impl VerifyFile for VerifyHandle {
     }
 }
 
-/// Pasta **nova** do teste de capacidade: `<volume>\diskdoctor-capacidade-AAAAMMDD-HHMMSS`.
+/// **New** Capacity Verification folder: `<volume>\diskdoctor-capacity-YYYYMMDD-HHMMSS`.
 ///
-/// - A pasta é criada com `create_dir` (falha se já existir).
-/// - Os arquivos são `CREATE_NEW` (`0001.ddcap`, `0002.ddcap`…): nada existente é aberto
-///   para escrita.
-/// - [`CapacityDir::cleanup`] apaga só os arquivos que esta instância criou e depois a
-///   pasta, que precisa estar vazia (`remove_dir`, nunca recursivo). `Drop` também limpa.
+/// - The folder is created with `create_dir` (fails if it already exists).
+/// - Files are `CREATE_NEW` (`0001.ddcap`, `0002.ddcap`…): nothing that already exists is
+///   opened for writing.
+/// - [`CapacityDir::cleanup`] deletes only the files this instance created and then the
+///   folder, which must be empty (`remove_dir`, never recursive). `Drop` cleans up too.
 pub struct CapacityDir {
     dir: PathBuf,
     files: Vec<PathBuf>,
@@ -495,7 +509,7 @@ pub struct CapacityDir {
 
 impl CapacityDir {
     pub fn create(parent: &Path, max_io: u32) -> std::io::Result<Self> {
-        let dir = parent.join(format!("diskdoctor-capacidade-{}", chrono::Local::now().format("%Y%m%d-%H%M%S")));
+        let dir = parent.join(format!("diskdoctor-capacity-{}", chrono::Local::now().format("%Y%m%d-%H%M%S")));
         std::fs::create_dir(&dir)?;
         Ok(Self { dir, files: Vec::new(), max_io })
     }
@@ -508,7 +522,7 @@ impl CapacityDir {
         self.dir.join(format!("{:04}.ddcap", index + 1))
     }
 
-    /// Apaga os arquivos criados e a pasta. Retorna as falhas (ex.: arquivo preso por E/S travada).
+    /// Deletes the created files and the folder. Returns the failures (e.g. a file held by hung I/O).
     pub fn cleanup(&mut self) -> Vec<String> {
         let mut errors = Vec::new();
         for f in self.files.drain(..) {
@@ -561,20 +575,20 @@ fn shell_execute(verb: &str, file: &std::ffi::OsStr, params: &str) -> Result<(),
         return Ok(());
     }
     Err(match last_error() {
-        1223 => "o pedido de permissão de Administrador foi recusado".into(),
-        0 => format!("falha ao abrir (código {})", r as isize),
+        1223 => crate::i18n::t("the Administrator permission request was declined", "o pedido de permissão de Administrador foi recusado").into(),
+        0 => tr!("could not open (code {})", "falha ao abrir (código {})", r as isize),
         c => win32_error_message(c),
     })
 }
 
-/// Abre o próprio diskdoctor numa janela nova **como Administrador** (mostra o prompt do UAC,
-/// que o usuário aprova ou recusa). Usado pelo modo interativo para os testes de leitura.
+/// Opens diskdoctor itself in a new window **as Administrator** (shows the UAC prompt, which
+/// the user approves or declines). Used by the interactive mode for direct-read tests.
 pub fn relaunch_as_admin(args: &str) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     shell_execute("runas", exe.as_os_str(), args)
 }
 
-/// Abre um arquivo com o programa padrão (ex.: relatório HTML no navegador).
+/// Opens a file with its default program (e.g. the HTML report in the browser).
 pub fn open_path(path: &Path) -> Result<(), String> {
     shell_execute("open", path.as_os_str(), "")
 }

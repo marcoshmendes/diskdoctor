@@ -1,16 +1,20 @@
-//! Eventos do Windows relacionados a armazenamento (log System).
+//! Storage-related Windows events (System log).
 //!
-//! Os IDs sozinhos são ambíguos (ex.: 129 também é usado pelo Hyper-V, 153 pelo
-//! Kernel-Boot), então a classificação usa o par (origem, ID) e, em alguns casos,
-//! o nível. Eventos não reconhecidos são descartados.
+//! IDs alone are ambiguous (e.g. 129 is also used by Hyper-V, 153 by Kernel-Boot), so the
+//! classification uses the (provider, ID) pair and, in some cases, the level. Events that
+//! are not recognized are dropped.
 //!
-//! Atribuição ao disco, da mais à menos confiável:
-//! 1. `\Device\HarddiskN\...` nas propriedades/mensagem → disco N (exata);
-//! 2. "Disk N"/"Disco N" na mensagem do driver `disk` → disco N (exata);
-//! 3. `Volume{guid}` / `\Device\HarddiskVolumeN` / letra → disco que contém o volume (exata);
-//! 4. eventos de driver de porta (storahci, stornvme...) → único disco daquele
-//!    barramento, se houver só um (inferida). Caso contrário fica sem disco.
+//! Attribution to a drive, from most to least reliable:
+//! 1. `\Device\HarddiskN\...` in the properties/message → drive N (exact);
+//! 2. "Disk N"/"Disco N" in the `disk` driver message → drive N (exact);
+//! 3. `Volume{guid}` / `\Device\HarddiskVolumeN` / letter → drive holding the volume (exact);
+//! 4. port driver events (storahci, stornvme...) → the only drive on that bus, if there is
+//!    just one (inferred). Otherwise the event has no drive.
+//!
+//! Event messages come from Windows in its display language, so the patterns below also
+//! match Portuguese words ("Disco", "unidade").
 
+use crate::i18n::t;
 use crate::inventory::{BusKind, DiskInfo, disk_for_letter, disk_for_volume_reference};
 use crate::platform;
 use anyhow::{Context, Result};
@@ -56,16 +60,16 @@ pub enum EventCategory {
 impl EventCategory {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Media => "Mídia",
-            Self::Communication => "Comunicação/timeout",
-            Self::Paging => "Paginação",
-            Self::FileSystem => "Sistema de arquivos",
-            Self::Shutdown => "Desligamento inesperado",
+            Self::Media => t("Media", "Mídia"),
+            Self::Communication => t("Communication/timeout", "Comunicação/timeout"),
+            Self::Paging => t("Paging", "Paginação"),
+            Self::FileSystem => t("File system", "Sistema de arquivos"),
+            Self::Shutdown => t("Unexpected shutdown", "Desligamento inesperado"),
             Self::Hardware => "Hardware (WHEA)",
         }
     }
 
-    /// Categorias que indicam problema no próprio caminho de E/S do disco.
+    /// Categories that point to a problem in the drive's own I/O path.
     pub fn is_storage_io(&self) -> bool {
         matches!(self, Self::Media | Self::Communication | Self::Paging)
     }
@@ -74,23 +78,26 @@ impl EventCategory {
 impl EventKind {
     pub fn description(&self) -> &'static str {
         match self {
-            Self::BadBlock => "bloco defeituoso detectado (bad block)",
-            Self::ControllerError => "erro de controladora",
-            Self::DeviceNotReady => "dispositivo não estava pronto",
-            Self::PagingError => "erro durante operação de paginação (arquivo de paginação)",
-            Self::SmartPredictedFailure => "SMART prevê falha do disco",
-            Self::IoRetried => "operação de E/S precisou ser repetida (retry)",
-            Self::IoFailedHardware => "operação de E/S falhou por erro de hardware",
-            Self::SurpriseRemoval => "disco removido/desconectado inesperadamente",
-            Self::DeviceReset => "reset emitido para o dispositivo (comando sem resposta)",
-            Self::DeviceTimeout => "dispositivo não respondeu dentro do tempo limite",
-            Self::FsCorruption => "estrutura do sistema de arquivos corrompida",
-            Self::VolumeNeedsRepair => "volume precisa de verificação/reparo (chkdsk)",
-            Self::TornWrite => "gravação interrompida detectada pelo NTFS",
-            Self::FlushFailed => "falha ao gravar dados pendentes (flush/delayed write)",
-            Self::UnexpectedReboot => "reinicialização sem desligamento correto (travamento ou queda de energia)",
-            Self::UnexpectedShutdown => "desligamento anterior foi inesperado",
-            Self::WheaHardwareError => "erro de hardware reportado pelo WHEA (PCIe/CPU/barramento)",
+            Self::BadBlock => t("bad block detected", "bloco defeituoso detectado (bad block)"),
+            Self::ControllerError => t("controller error", "erro de controladora"),
+            Self::DeviceNotReady => t("device was not ready", "dispositivo não estava pronto"),
+            Self::PagingError => t("error during a paging operation (page file)", "erro durante operação de paginação (arquivo de paginação)"),
+            Self::SmartPredictedFailure => t("SMART predicts a drive failure", "SMART prevê falha do disco"),
+            Self::IoRetried => t("an I/O operation had to be retried", "operação de E/S precisou ser repetida (retry)"),
+            Self::IoFailedHardware => t("an I/O operation failed due to a hardware error", "operação de E/S falhou por erro de hardware"),
+            Self::SurpriseRemoval => t("drive removed/disconnected unexpectedly", "disco removido/desconectado inesperadamente"),
+            Self::DeviceReset => t("reset issued to the device (command not answered)", "reset emitido para o dispositivo (comando sem resposta)"),
+            Self::DeviceTimeout => t("device did not respond within the timeout", "dispositivo não respondeu dentro do tempo limite"),
+            Self::FsCorruption => t("file system structure corrupted", "estrutura do sistema de arquivos corrompida"),
+            Self::VolumeNeedsRepair => t("volume needs a check/repair (chkdsk)", "volume precisa de verificação/reparo (chkdsk)"),
+            Self::TornWrite => t("interrupted write detected by NTFS", "gravação interrompida detectada pelo NTFS"),
+            Self::FlushFailed => t("failed to write pending data (flush/delayed write)", "falha ao gravar dados pendentes (flush/delayed write)"),
+            Self::UnexpectedReboot => t(
+                "restart without a clean shutdown (hang or power loss)",
+                "reinicialização sem desligamento correto (travamento ou queda de energia)",
+            ),
+            Self::UnexpectedShutdown => t("the previous shutdown was unexpected", "desligamento anterior foi inesperado"),
+            Self::WheaHardwareError => t("hardware error reported by WHEA (PCIe/CPU/bus)", "erro de hardware reportado pelo WHEA (PCIe/CPU/barramento)"),
         }
     }
 
@@ -124,16 +131,16 @@ pub struct StorageEvent {
     pub time: DateTime<Utc>,
     pub provider: String,
     pub id: u32,
-    /// 1 crítico, 2 erro, 3 aviso, 4 informação.
+    /// 1 critical, 2 error, 3 warning, 4 information.
     pub level: u8,
     pub record_id: u64,
     pub kind: EventKind,
     pub category: EventCategory,
     pub disk_number: Option<u32>,
     pub attribution: Attribution,
-    /// Dispositivo citado no evento (ex.: `\Device\Harddisk2\DR2`, `\Device\RaidPort0`).
+    /// Device cited by the event (e.g. `\Device\Harddisk2\DR2`, `\Device\RaidPort0`).
     pub device: Option<String>,
-    /// LBA citado (eventos 153).
+    /// Cited LBA (153 events).
     pub lba: Option<u64>,
     pub message: String,
     #[serde(default)]
@@ -147,16 +154,16 @@ impl StorageEvent {
 
     pub fn level_label(&self) -> &'static str {
         match self.level {
-            1 => "Crítico",
-            2 => "Erro",
-            3 => "Aviso",
-            4 | 0 => "Informação",
-            _ => "Detalhe",
+            1 => t("Critical", "Crítico"),
+            2 => t("Error", "Erro"),
+            3 => t("Warning", "Aviso"),
+            4 | 0 => t("Information", "Informação"),
+            _ => t("Verbose", "Detalhe"),
         }
     }
 }
 
-/// IDs consultados no log System (filtrados depois por origem).
+/// IDs queried in the System log (filtered by provider afterwards).
 pub const QUERY_EVENT_IDS: &[u32] = &[1, 7, 9, 11, 15, 17, 18, 19, 41, 50, 51, 52, 55, 57, 98, 129, 140, 153, 154, 157, 6008];
 
 static PORT_PROVIDER: LazyLock<Regex> = LazyLock::new(|| {
@@ -165,7 +172,7 @@ static PORT_PROVIDER: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("regex")
 });
-// `Harddisk` seguido direto de dígitos: não casa com `HarddiskVolumeN`.
+// `Harddisk` followed directly by digits: does not match `HarddiskVolumeN`.
 static RE_HARDDISK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\\Device\\Harddisk(\d+)(?:\\[A-Za-z]+\d*)?").expect("regex"));
 static RE_DISK_WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(?:disk|disco)\s+(\d+)\b").expect("regex"));
 static RE_LETTER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(?:volume|unidade|drive)\s+([A-Z]):").expect("regex"));
@@ -176,7 +183,7 @@ pub fn is_storage_port_provider(provider: &str) -> bool {
     PORT_PROVIDER.is_match(provider)
 }
 
-/// Classifica (origem, ID, nível). `None` = evento não relacionado a armazenamento.
+/// Classifies (provider, ID, level). `None` = not a storage event.
 pub fn classify(provider: &str, id: u32, level: u8) -> Option<EventKind> {
     use EventKind::*;
     let p = provider.trim().to_ascii_lowercase();
@@ -219,7 +226,7 @@ pub fn classify(provider: &str, id: u32, level: u8) -> Option<EventKind> {
     }
 }
 
-/// Barramento atendido por um driver de porta, para inferir o disco de eventos 129/9.
+/// Bus served by a port driver, to infer the drive of 129/9 events.
 pub fn driver_bus(provider: &str) -> Option<BusKind> {
     let p = provider.to_ascii_lowercase();
     if p.contains("nvme") {
@@ -233,7 +240,7 @@ pub fn driver_bus(provider: &str) -> Option<BusKind> {
     }
 }
 
-/// Monta o script PowerShell de consulta (janela em horas, limite de eventos).
+/// Builds the PowerShell query script (window in hours, event limit).
 pub fn build_query_script(hours: u32, max_events: u32) -> String {
     let ids = QUERY_EVENT_IDS.iter().map(|id| format!("EventID={id}")).collect::<Vec<_>>().join(" or ");
     let ms = hours as u64 * 3_600_000;
@@ -270,13 +277,13 @@ struct RawEvent {
     message: Option<String>,
 }
 
-/// Converte o JSON da consulta em eventos classificados (descarta os irrelevantes).
+/// Converts the query JSON into classified events (drops irrelevant ones).
 pub fn parse_events_json(json: &str) -> Result<Vec<StorageEvent>> {
     let json = json.trim();
     if json.is_empty() {
         return Ok(vec![]);
     }
-    let raw: Vec<RawEvent> = serde_json::from_str(json).context("JSON de eventos inválido")?;
+    let raw: Vec<RawEvent> = serde_json::from_str(json).context(t("invalid events JSON", "JSON de eventos inválido"))?;
     let mut events: Vec<StorageEvent> = raw
         .into_iter()
         .filter_map(|e| {
@@ -310,7 +317,7 @@ pub fn parse_events_json(json: &str) -> Result<Vec<StorageEvent>> {
     Ok(events)
 }
 
-/// Liga cada evento a um disco do inventário (ver regras no topo do módulo).
+/// Links each event to an inventory drive (see the rules at the top of the module).
 pub fn attribute_events(events: &mut [StorageEvent], disks: &[DiskInfo]) {
     for e in events.iter_mut() {
         let haystack = format!("{} {}", e.properties.join(" "), e.message);
@@ -351,7 +358,7 @@ pub fn attribute_events(events: &mut [StorageEvent], disks: &[DiskInfo]) {
             if let Some(bus) = driver_bus(&e.provider) {
                 let mut candidates: Vec<&DiskInfo> = disks.iter().filter(|d| d.bus == bus).collect();
                 if candidates.is_empty() && bus == BusKind::Sata {
-                    // Controladoras Intel RST/AMD RAID expõem discos SATA como "RAID".
+                    // Intel RST/AMD RAID controllers expose SATA drives as "RAID".
                     candidates = disks.iter().filter(|d| d.bus == BusKind::Raid).collect();
                 }
                 if candidates.len() == 1 {
@@ -363,10 +370,11 @@ pub fn attribute_events(events: &mut [StorageEvent], disks: &[DiskInfo]) {
     }
 }
 
-/// Consulta, classifica e atribui eventos das últimas `hours` horas.
+/// Queries, classifies and attributes the events of the last `hours` hours.
 pub fn collect_events(hours: u32, max_events: u32, disks: &[DiskInfo]) -> Result<Vec<StorageEvent>> {
     let script = build_query_script(hours, max_events);
-    let json = platform::powershell::run_script(&script, Duration::from_secs(120)).context("falha ao consultar o Log de Eventos (Get-WinEvent)")?;
+    let json = platform::powershell::run_script(&script, Duration::from_secs(120))
+        .context(t("failed to query the Event Log (Get-WinEvent)", "falha ao consultar o Log de Eventos (Get-WinEvent)"))?;
     let mut events = parse_events_json(&json)?;
     attribute_events(&mut events, disks);
     Ok(events)
@@ -386,11 +394,11 @@ mod tests {
         assert_eq!(classify("storahci", 129, 3), Some(EventKind::DeviceReset));
         assert_eq!(classify("stornvme", 129, 3), Some(EventKind::DeviceReset));
         assert_eq!(classify("iaStorAC", 9, 2), Some(EventKind::DeviceTimeout));
-        // Mesmos IDs vindos de outras origens não são de disco.
+        // The same IDs from other providers are not drive events.
         assert_eq!(classify("Microsoft-Windows-Hyper-V-Hypervisor", 129, 4), None);
         assert_eq!(classify("Microsoft-Windows-Kernel-Boot", 153, 4), None);
         assert_eq!(classify("Microsoft-Windows-Kernel-Processor-Power", 55, 4), None);
-        // NTFS 98 só conta quando não é informativo ("volume íntegro").
+        // NTFS 98 only counts when it is not informational ("volume is healthy").
         assert_eq!(classify("Microsoft-Windows-Ntfs", 98, 2), Some(EventKind::VolumeNeedsRepair));
         assert_eq!(classify("Microsoft-Windows-Ntfs", 98, 4), None);
         assert_eq!(classify("Microsoft-Windows-Ntfs", 7, 3), Some(EventKind::TornWrite));
@@ -414,7 +422,7 @@ mod tests {
         let mut events = parse_events_json(FIXTURE).unwrap();
         attribute_events(&mut events, &disks);
 
-        // Irrelevantes (Hyper-V 129, Kernel-Boot 153, Processor-Power 55, NTFS 98 informativo) descartados.
+        // Irrelevant ones (Hyper-V 129, Kernel-Boot 153, Processor-Power 55, informational NTFS 98) are dropped.
         assert!(events.iter().all(|e| !e.provider.contains("Hyper-V")));
         assert!(events.iter().all(|e| !e.provider.contains("Kernel-Boot")));
 
@@ -426,22 +434,22 @@ mod tests {
 
         let ntfs: Vec<_> = events.iter().filter(|e| e.kind == EventKind::VolumeNeedsRepair).collect();
         assert_eq!(ntfs.len(), 1);
-        assert_eq!(ntfs[0].disk_number, Some(1), "Volume{{000000000104...}} fica no disco 1");
+        assert_eq!(ntfs[0].disk_number, Some(1), "Volume{{000000000104...}} is on drive 1");
 
         let reboot = events.iter().find(|e| e.kind == EventKind::UnexpectedReboot).unwrap();
         assert_eq!(reboot.disk_number, None);
 
-        // Ordenado do mais recente para o mais antigo.
+        // Sorted from newest to oldest.
         assert!(events.windows(2).all(|w| w[0].time >= w[1].time));
     }
 
     #[test]
     fn infers_disk_for_port_driver_only_when_unique() {
-        let disks = fixture_disks(); // três discos SATA
+        let disks = fixture_disks(); // three SATA drives
         let json = r#"[{"TimeUtc":"2026-11-08T10:00:00.0000000Z","Provider":"storahci","Id":129,"Level":3,"RecordId":1,"Properties":["\\Device\\RaidPort0"],"Message":"Reset to device, \\Device\\RaidPort0, was issued."}]"#;
         let mut events = parse_events_json(json).unwrap();
         attribute_events(&mut events, &disks);
-        assert_eq!(events[0].disk_number, None, "três discos SATA: não dá para saber qual");
+        assert_eq!(events[0].disk_number, None, "three SATA drives: no way to tell which");
         assert_eq!(events[0].device.as_deref(), Some(r"\Device\RaidPort0"));
 
         let one_sata: Vec<DiskInfo> = disks.into_iter().filter(|d| d.number == 2).collect();

@@ -1,16 +1,19 @@
-//! Renderização HTML autocontida do relatório. Todo texto dinâmico passa por
-//! [`e`] (escape HTML) — mensagens de eventos e nomes de modelo vêm do sistema
-//! e não são confiáveis.
+//! Self-contained HTML rendering of the report. Every dynamic text goes through [`e`]
+//! (HTML escaping) — event messages and model names come from the system and are not
+//! trusted. Labels follow the active language; `<html lang>` follows the report.
 
 use super::DiagnosticReport;
 use crate::analysis::{DiskStatus, Finding, Severity};
-use crate::benchmark::BenchMetrics;
+use crate::benchmark::{BenchMetrics, display_label};
+use crate::i18n::{Lang, t};
 use crate::inventory::DiskInfo;
 use crate::scan::{ScanResult, TimelinePoint};
 use crate::smart::SmartReport;
 use crate::stats::LatencySummary;
-use crate::util::{decimal, format_bytes, format_bytes_binary, format_duration, format_mbps, format_ms, html_escape, int, truncate_chars};
-use chrono::Local;
+use crate::util::{
+    decimal, format_bytes, format_bytes_binary, format_duration, format_mbps, format_ms, html_escape, int, local_date, local_datetime,
+    local_datetime_secs, truncate_chars,
+};
 use std::fmt::Write;
 use std::time::Duration;
 
@@ -24,6 +27,10 @@ fn opt<T: std::fmt::Display>(v: Option<T>) -> String {
 
 fn opt_int(v: Option<u64>) -> String {
     v.map(int).unwrap_or_else(|| "—".into())
+}
+
+fn yes_no(v: bool) -> &'static str {
+    if v { t("yes", "sim") } else { t("no", "não") }
 }
 
 fn status_class(s: DiskStatus) -> &'static str {
@@ -71,29 +78,39 @@ svg text{fill:var(--muted);font-size:11px}svg .grid-line{stroke:var(--border)}sv
 @media print{body{background:#fff}.card{break-inside:avoid}}
 "#;
 
-/// Renderiza o relatório completo.
+/// Renders the whole report.
 pub fn render(r: &DiagnosticReport) -> String {
     let mut h = String::with_capacity(96 * 1024);
-    let generated = r.generated_at.with_timezone(&Local).format("%d/%m/%Y %H:%M");
+    let generated = local_datetime(r.generated_at);
+    let lang = match r.language {
+        Lang::En => "en",
+        Lang::PtBr => "pt-BR",
+    };
     let _ = write!(
         h,
-        "<!doctype html><html lang=\"pt-BR\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
-         <title>Relatório diskdoctor — {}</title><style>{CSS}</style></head><body><main>",
-        e(&generated.to_string())
+        "<!doctype html><html lang=\"{lang}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+         <title>{} — {}</title><style>{CSS}</style></head><body><main>",
+        e(t("diskdoctor report", "Relatório diskdoctor")),
+        e(&generated)
     );
     let _ = write!(
         h,
-        "<h1>Relatório de diagnóstico de discos</h1><p class=\"meta\">{} · gerado em {} · diskdoctor {} · Administrador: {} · {} · eventos das últimas {} h</p>",
-        e(r.computer.as_deref().unwrap_or("computador")),
-        e(&generated.to_string()),
-        e(&r.version),
-        if r.elevated { "sim" } else { "não" },
-        e(r.smartctl.as_deref().unwrap_or("smartctl não encontrado")),
-        r.event_window_hours
+        "<h1>{}</h1><p class=\"meta\">{}</p>",
+        e(t("Drive diagnostic report", "Relatório de diagnóstico de discos")),
+        e(&tr!(
+            "{} · generated {} · diskdoctor {} · Administrator: {} · {} · events of the last {} h",
+            "{} · gerado em {} · diskdoctor {} · Administrador: {} · {} · eventos das últimas {} h",
+            r.computer.as_deref().unwrap_or(t("computer", "computador")),
+            generated,
+            r.version,
+            yes_no(r.elevated),
+            r.smartctl.as_deref().unwrap_or(t("smartctl not found", "smartctl não encontrado")),
+            r.event_window_hours
+        ))
     );
 
-    // Resumo
-    h.push_str("<h2>Resumo</h2><div class=\"grid\">");
+    // Summary
+    let _ = write!(h, "<h2>{}</h2><div class=\"grid\">", e(t("Summary", "Resumo")));
     for v in &r.analysis.verdicts {
         let disk = r.disks.iter().find(|d| d.number == v.disk_number);
         let cls = status_class(v.status);
@@ -108,15 +125,15 @@ pub fn render(r: &DiagnosticReport) -> String {
     }
     h.push_str("</div>");
     if !r.warnings.is_empty() {
-        h.push_str("<div class=\"card\"><strong>Avisos da coleta</strong><ul>");
+        let _ = write!(h, "<div class=\"card\"><strong>{}</strong><ul>", e(t("Collection warnings", "Avisos da coleta")));
         for w in &r.warnings {
             let _ = write!(h, "<li>{}</li>", e(w));
         }
         h.push_str("</ul></div>");
     }
 
-    // Diagnóstico
-    h.push_str("<h2>Diagnóstico e correlação</h2>");
+    // Diagnosis
+    let _ = write!(h, "<h2>{}</h2>", e(t("Diagnosis and correlation", "Diagnóstico e correlação")));
     for v in &r.analysis.verdicts {
         let cls = status_class(v.status);
         let _ = write!(h, "<div class=\"card disk-card {cls}\"><h3>{} <span class=\"badge b-{cls}\">{}</span></h3>", e(&v.label), e(v.status.label()));
@@ -126,9 +143,14 @@ pub fn render(r: &DiagnosticReport) -> String {
         for f in &v.findings {
             finding_html(&mut h, f);
         }
-        let _ = write!(h, "<p class=\"muted\"><strong>Fontes analisadas:</strong> {}</p>", e(&v.sources_used.join(" · ")));
+        let _ = write!(
+            h,
+            "<p class=\"muted\"><strong>{}</strong> {}</p>",
+            e(t("Sources analyzed:", "Fontes analisadas:")),
+            e(&v.sources_used.join(" · "))
+        );
         if !v.gaps.is_empty() {
-            h.push_str("<p class=\"muted\"><strong>Não verificado:</strong></p><ul class=\"muted\">");
+            let _ = write!(h, "<p class=\"muted\"><strong>{}</strong></p><ul class=\"muted\">", e(t("Not checked:", "Não verificado:")));
             for g in &v.gaps {
                 let _ = write!(h, "<li>{}</li>", e(g));
             }
@@ -137,20 +159,27 @@ pub fn render(r: &DiagnosticReport) -> String {
         h.push_str("</div>");
     }
     if !r.analysis.global_findings.is_empty() {
-        h.push_str("<div class=\"card\"><h3>Achados gerais (sem disco específico)</h3>");
+        let _ = write!(h, "<div class=\"card\"><h3>{}</h3>", e(t("General findings (no specific drive)", "Achados gerais (sem disco específico)")));
         for f in &r.analysis.global_findings {
             finding_html(&mut h, f);
         }
         h.push_str("</div>");
     }
-    h.push_str("<div class=\"card\"><strong>Notas importantes</strong><ul>");
+    let _ = write!(h, "<div class=\"card\"><strong>{}</strong><ul>", e(t("Important notes", "Notas importantes")));
     for n in &r.analysis.notes {
         let _ = write!(h, "<li>{}</li>", e(n));
     }
     h.push_str("</ul></div>");
 
-    // Discos
-    h.push_str("<h2>Discos</h2><div class=\"card table-wrap\"><table><tr><th>#</th><th>Tags</th><th>Modelo</th><th>Serial</th><th>Capacidade</th><th>Tipo</th><th>Firmware</th><th>Volumes</th><th>Windows</th></tr>");
+    // Drives
+    let _ = write!(
+        h,
+        "<h2>{}</h2><div class=\"card table-wrap\"><table><tr><th>#</th><th>Tags</th><th>{}</th><th>Serial</th><th>{}</th><th>{}</th><th>Firmware</th><th>Volumes</th><th>Windows</th></tr>",
+        e(t("Drives", "Discos")),
+        e(t("Model", "Modelo")),
+        e(t("Capacity", "Capacidade")),
+        e(t("Type", "Tipo"))
+    );
     for d in &r.disks {
         let _ = write!(
             h,
@@ -163,40 +192,54 @@ pub fn render(r: &DiagnosticReport) -> String {
             e(&d.class_label()),
             e(d.firmware.as_deref().unwrap_or("—")),
             e(&volumes_text(d)),
-            e(&d.windows_health)
+            e(crate::ui::windows_health_label(&d.windows_health))
         );
     }
     h.push_str("</table></div>");
 
     // SMART
-    h.push_str("<h2>SMART e contadores</h2>");
+    let _ = write!(h, "<h2>{}</h2>", e(t("SMART and counters", "SMART e contadores")));
     for d in &r.disks {
         let health = r.health.iter().find(|x| x.disk_number == d.number);
         let _ = write!(h, "<div class=\"card\"><h3>{}</h3>", e(&d.title()));
         match health.and_then(|x| x.smart.as_ref()) {
             Some(s) if s.available => smart_html(&mut h, s),
             Some(s) => {
-                let _ = write!(h, "<p class=\"muted\">SMART indisponível: {}</p>", e(s.error.as_deref().unwrap_or("sem dados")));
+                let _ = write!(
+                    h,
+                    "<p class=\"muted\">{}</p>",
+                    e(&tr!("SMART unavailable: {}", "SMART indisponível: {}", s.error.as_deref().unwrap_or(t("no data", "sem dados"))))
+                );
             }
-            None => h.push_str("<p class=\"muted\">SMART não consultado.</p>"),
+            None => {
+                let _ = write!(h, "<p class=\"muted\">{}</p>", e(t("SMART not queried.", "SMART não consultado.")));
+            }
         }
         if let Some(w) = health.and_then(|x| x.windows.as_ref()) {
             let _ = write!(
                 h,
-                "<p class=\"muted\">Windows: temperatura {} °C · desgaste {}% · erros de leitura não corrigidos {} · latência máx. leitura {} ms / gravação {} ms</p>",
-                opt(w.temperature_c),
-                opt(w.wear_percent),
-                opt_int(w.read_errors_uncorrected),
-                opt_int(w.read_latency_max_ms),
-                opt_int(w.write_latency_max_ms)
+                "<p class=\"muted\">{}</p>",
+                e(&tr!(
+                    "Windows: temperature {} °C · wear {}% · uncorrected read errors {} · max latency read {} ms / write {} ms",
+                    "Windows: temperatura {} °C · desgaste {}% · erros de leitura não corrigidos {} · latência máx. leitura {} ms / gravação {} ms",
+                    opt(w.temperature_c),
+                    opt(w.wear_percent),
+                    opt_int(w.read_errors_uncorrected),
+                    opt_int(w.read_latency_max_ms),
+                    opt_int(w.write_latency_max_ms)
+                ))
             );
         }
         if let Some(delta) = health.and_then(|x| x.history.as_ref()) {
-            let since = delta.baseline_time.with_timezone(&Local).format("%d/%m/%Y");
+            let since = local_date(delta.baseline_time);
             if delta.changes.is_empty() {
-                let _ = write!(h, "<p class=\"muted\">Histórico: nenhum contador de problema aumentou desde {since}.</p>");
+                let _ = write!(
+                    h,
+                    "<p class=\"muted\">{}</p>",
+                    e(&tr!("History: no problem counter increased since {since}.", "Histórico: nenhum contador de problema aumentou desde {since}."))
+                );
             } else {
-                let _ = write!(h, "<p><strong>Contadores que aumentaram desde {since}:</strong></p><ul>");
+                let _ = write!(h, "<p><strong>{}</strong></p><ul>", e(&tr!("Counters that increased since {since}:", "Contadores que aumentaram desde {since}:")));
                 for c in &delta.changes {
                     let _ = write!(h, "<li>{}: {} → {}</li>", e(&c.label), int(c.before), int(c.after));
                 }
@@ -206,10 +249,17 @@ pub fn render(r: &DiagnosticReport) -> String {
         h.push_str("</div>");
     }
 
-    // Testes de leitura
-    h.push_str("<h2>Testes de leitura</h2>");
+    // Surface Scans
+    h.push_str("<h2>Surface Scan</h2>");
     if r.scans.is_empty() {
-        h.push_str("<p class=\"muted\">Nenhum teste de leitura incluído. Execute <code>diskdoctor scan --disk N</code> (como Administrador) e gere o relatório novamente.</p>");
+        let _ = write!(
+            h,
+            "<p class=\"muted\">{}</p>",
+            t(
+                "No Surface Scan included. Run <code>diskdoctor scan --disk N</code> (as Administrator) and generate the report again.",
+                "Nenhum Surface Scan incluído. Execute <code>diskdoctor scan --disk N</code> (como Administrador) e gere o relatório novamente.",
+            )
+        );
     }
     for s in &r.scans {
         scan_html(&mut h, s);
@@ -217,43 +267,63 @@ pub fn render(r: &DiagnosticReport) -> String {
 
     // Benchmarks
     if !r.benchmarks.is_empty() {
-        h.push_str("<h2>Benchmarks</h2>");
+        h.push_str("<h2>Benchmark</h2>");
         for b in &r.benchmarks {
             let _ = write!(h, "<div class=\"card\"><h3>{}</h3>", e(&b.disk.title()));
             if let Some(m) = &b.read {
-                bench_table(&mut h, "Leitura (disco físico)", m);
+                bench_table(&mut h, t("Read (physical drive)", "Leitura (disco físico)"), m);
             }
             if let Some(w) = &b.write {
-                bench_table(&mut h, &format!("Escrita (arquivo temporário em {}, {})", w.target_dir, format_bytes(w.file_size)), &w.metrics);
+                bench_table(
+                    &mut h,
+                    &tr!("Write (temporary file in {}, {})", "Escrita (arquivo temporário em {}, {})", w.target_dir, format_bytes(w.file_size)),
+                    &w.metrics,
+                );
             }
             h.push_str("</div>");
         }
     }
 
-    // Verificação de capacidade
+    // Capacity Verification
     if !r.capacity.is_empty() {
-        h.push_str("<h2>Verificação de capacidade</h2>");
+        h.push_str("<h2>Capacity Verification</h2>");
         for c in &r.capacity {
             capacity_html(&mut h, c);
         }
     }
 
-    // Eventos
-    let _ = write!(h, "<h2>Eventos do Windows ({})</h2>", r.events.len());
+    // Events
+    let _ = write!(h, "<h2>{}</h2>", e(&tr!("Windows events ({})", "Eventos do Windows ({})", r.events.len())));
     if r.events.is_empty() {
-        h.push_str("<p class=\"muted\">Nenhum evento de armazenamento no período (ou o log não foi consultado).</p>");
+        let _ = write!(
+            h,
+            "<p class=\"muted\">{}</p>",
+            e(t(
+                "No storage events in the period (or the log was not queried).",
+                "Nenhum evento de armazenamento no período (ou o log não foi consultado).",
+            ))
+        );
     } else {
-        h.push_str("<div class=\"card table-wrap\"><table><tr><th>Data/hora</th><th>Origem/ID</th><th>Nível</th><th>Disco</th><th>Tipo</th><th>Mensagem</th></tr>");
+        let _ = write!(
+            h,
+            "<div class=\"card table-wrap\"><table><tr><th>{}</th><th>{}</th><th>{}</th><th>{}</th><th>{}</th><th>{}</th></tr>",
+            e(t("Date/time", "Data/hora")),
+            e(t("Source/ID", "Origem/ID")),
+            e(t("Level", "Nível")),
+            e(t("Drive", "Disco")),
+            e(t("Type", "Tipo")),
+            e(t("Message", "Mensagem"))
+        );
         for ev in r.events.iter().take(500) {
             let disk = match (ev.disk_number, ev.attribution) {
-                (Some(n), crate::events::Attribution::Inferred) => format!("{n} (inferido)"),
+                (Some(n), crate::events::Attribution::Inferred) => tr!("{n} (inferred)", "{n} (inferido)"),
                 (Some(n), _) => n.to_string(),
                 (None, _) => "—".into(),
             };
             let _ = write!(
                 h,
                 "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-                ev.time.with_timezone(&Local).format("%d/%m/%Y %H:%M:%S"),
+                e(&local_datetime_secs(ev.time)),
                 e(&ev.code()),
                 e(ev.level_label()),
                 e(&disk),
@@ -263,21 +333,29 @@ pub fn render(r: &DiagnosticReport) -> String {
         }
         h.push_str("</table>");
         if r.events.len() > 500 {
-            let _ = write!(h, "<p class=\"muted\">Mostrando 500 de {} eventos; todos estão no relatório JSON.</p>", r.events.len());
+            let _ = write!(
+                h,
+                "<p class=\"muted\">{}</p>",
+                e(&tr!("Showing 500 of {} events; all of them are in the JSON report.", "Mostrando 500 de {} eventos; todos estão no relatório JSON.", r.events.len()))
+            );
         }
         h.push_str("</div>");
     }
 
-    // Limitações
-    h.push_str("<h2>Limitações e avisos</h2><div class=\"card\"><ul>");
+    // Limitations
+    let _ = write!(h, "<h2>{}</h2><div class=\"card\"><ul>", e(t("Limitations and warnings", "Limitações e avisos")));
     for l in &r.limitations {
         let _ = write!(h, "<li>{}</li>", e(l));
     }
     h.push_str("</ul></div>");
     let _ = write!(
         h,
-        "<footer>Gerado por diskdoctor {} — diagnóstico não destrutivo. Nenhum dado foi gravado nos discos analisados. Seriais exibidos parcialmente mascarados.</footer></main></body></html>",
-        e(&r.version)
+        "<footer>{}</footer></main></body></html>",
+        e(&tr!(
+            "Generated by diskdoctor {} — non-destructive diagnostics. No data was written to the analyzed drives. Serials are shown partially masked.",
+            "Gerado por diskdoctor {} — diagnóstico não destrutivo. Nenhum dado foi gravado nos discos analisados. Seriais exibidos parcialmente mascarados.",
+            r.version
+        ))
     );
     h
 }
@@ -289,7 +367,7 @@ fn disk_line(d: &DiskInfo) -> String {
         s.push_str(&format!(" · {}", letters.join(" ")));
     }
     if d.is_boot || d.is_system {
-        s.push_str(" · disco do sistema");
+        s.push_str(t(" · system drive", " · disco do sistema"));
     }
     s
 }
@@ -301,7 +379,7 @@ fn volumes_text(d: &DiskInfo) -> String {
         .filter_map(|p| {
             p.drive_letter.as_ref().map(|l| {
                 let label = p.label.as_deref().map(|x| format!(" {x}")).unwrap_or_default();
-                let free = p.volume_free.map(|f| format!(", {} livres", format_bytes(f))).unwrap_or_default();
+                let free = p.volume_free.map(|f| tr!(", {} free", ", {} livres", format_bytes(f))).unwrap_or_default();
                 format!("{l}:{label} ({}{free})", p.file_system.as_deref().unwrap_or("?"))
             })
         })
@@ -312,7 +390,7 @@ fn volumes_text(d: &DiskInfo) -> String {
         if !s.is_empty() {
             s.push_str("; ");
         }
-        s.push_str(&format!("+{hidden} partição(ões) sem letra"));
+        s.push_str(&tr!("+{hidden} partition(s) without letter", "+{hidden} partição(ões) sem letra"));
     }
     if s.is_empty() { "—".into() } else { s }
 }
@@ -321,61 +399,77 @@ fn finding_html(h: &mut String, f: &Finding) {
     let cls = severity_class(f.severity);
     let _ = write!(
         h,
-        "<div class=\"finding {cls}\"><h4><span class=\"badge b-{cls}\">{}</span> {} <span class=\"muted\">· confiança {}</span></h4><ul>",
+        "<div class=\"finding {cls}\"><h4><span class=\"badge b-{cls}\">{}</span> {} <span class=\"muted\">· {}</span></h4><ul>",
         e(f.severity.label()),
         e(&f.title),
-        e(f.confidence.label())
+        e(&tr!("confidence {}", "confiança {}", f.confidence.label().to_lowercase()))
     );
     for ev in &f.evidence {
         let _ = write!(h, "<li><span class=\"src\">{}</span>{}</li>", e(ev.source.label()), e(&ev.text));
     }
     h.push_str("</ul>");
     if !f.possible_causes.is_empty() {
-        let _ = write!(h, "<p><strong>Possíveis causas:</strong> {}</p>", e(&f.possible_causes.join("; ")));
+        let _ = write!(h, "<p><strong>{}</strong> {}</p>", e(t("Possible causes:", "Possíveis causas:")), e(&f.possible_causes.join("; ")));
     }
     if !f.recommendations.is_empty() {
-        h.push_str("<p><strong>Recomendações:</strong></p><ul>");
+        let _ = write!(h, "<p><strong>{}</strong></p><ul>", e(t("Recommendations:", "Recomendações:")));
         for r in &f.recommendations {
             let _ = write!(h, "<li>{}</li>", e(r));
         }
         h.push_str("</ul>");
     }
-    let _ = write!(h, "<p class=\"muted\">Base da confiança: {}</p></div>", e(&f.confidence_basis));
+    let _ = write!(h, "<p class=\"muted\">{}</p></div>", e(&tr!("Confidence basis: {}", "Base da confiança: {}", f.confidence_basis)));
 }
 
-fn smart_html(h: &mut String, s: &SmartReport) {
-    let passed = match s.overall_passed {
-        Some(true) => "aprovado",
-        Some(false) => "FALHOU",
-        None => "—",
-    };
-    let rows: Vec<(&str, String)> = vec![
-        ("Avaliação geral", passed.into()),
-        ("Fonte", s.source.clone()),
-        ("Temperatura", s.temperature_c.map(|t| format!("{t} °C")).unwrap_or("—".into())),
-        ("Horas ligado", opt_int(s.power_on_hours)),
-        ("Ciclos de energia", opt_int(s.power_cycles)),
-        ("Desligamentos bruscos", opt_int(s.unsafe_shutdowns)),
-        ("Vida útil consumida", s.wear_used_percent.map(|w| format!("{w}%")).unwrap_or("—".into())),
-        ("Setores realocados", opt_int(s.reallocated_sectors)),
-        ("Setores pendentes", opt_int(s.pending_sectors)),
-        ("Incorrigíveis", opt_int(s.offline_uncorrectable.or(s.reported_uncorrectable))),
-        ("Erros CRC (interface)", opt_int(s.interface_crc_errors)),
-        ("Erros CRC (fabricante)", opt_int(s.vendor_crc_errors)),
-        ("Timeouts de comando", opt_int(s.command_timeouts)),
-        ("Erros de mídia (NVMe)", opt_int(s.media_errors)),
-        ("Entradas no log de erros", opt_int(s.error_log_entries)),
-    ];
+fn kv(h: &mut String, rows: Vec<(&str, String)>) {
     h.push_str("<dl class=\"kv\">");
     for (k, v) in rows {
         let _ = write!(h, "<dt>{}</dt><dd>{}</dd>", e(k), e(&v));
     }
     h.push_str("</dl>");
+}
+
+fn smart_html(h: &mut String, s: &SmartReport) {
+    let passed = match s.overall_passed {
+        Some(true) => t("PASSED", "APROVADO"),
+        Some(false) => t("FAILED", "FALHOU"),
+        None => "—",
+    };
+    kv(
+        h,
+        vec![
+            (t("Overall assessment", "Avaliação geral"), passed.into()),
+            (t("Source", "Fonte"), s.source.clone()),
+            (t("Temperature", "Temperatura"), s.temperature_c.map(|t| format!("{t} °C")).unwrap_or("—".into())),
+            (t("Power-on hours", "Horas ligado"), opt_int(s.power_on_hours)),
+            (t("Power cycles", "Ciclos de energia"), opt_int(s.power_cycles)),
+            (t("Unsafe shutdowns", "Desligamentos bruscos"), opt_int(s.unsafe_shutdowns)),
+            (t("Endurance used", "Vida útil consumida"), s.wear_used_percent.map(|w| format!("{w}%")).unwrap_or("—".into())),
+            (t("Reallocated sectors", "Setores realocados"), opt_int(s.reallocated_sectors)),
+            (t("Pending sectors", "Setores pendentes"), opt_int(s.pending_sectors)),
+            (t("Uncorrectable", "Incorrigíveis"), opt_int(s.offline_uncorrectable.or(s.reported_uncorrectable))),
+            (t("CRC errors (interface)", "Erros CRC (interface)"), opt_int(s.interface_crc_errors)),
+            (t("CRC errors (vendor)", "Erros CRC (fabricante)"), opt_int(s.vendor_crc_errors)),
+            (t("Command timeouts", "Timeouts de comando"), opt_int(s.command_timeouts)),
+            (t("Media errors (NVMe)", "Erros de mídia (NVMe)"), opt_int(s.media_errors)),
+            (t("Error log entries", "Entradas no log de erros"), opt_int(s.error_log_entries)),
+        ],
+    );
     if !s.exit_flags.is_empty() {
         let _ = write!(h, "<p class=\"muted\">smartctl: {}</p>", e(&s.exit_flags.join("; ")));
     }
     if !s.attributes.is_empty() {
-        h.push_str("<details><summary>Todos os atributos SMART</summary><div class=\"table-wrap\"><table><tr><th>ID</th><th>Nome</th><th>Valor</th><th>Pior</th><th>Limite</th><th>Bruto</th><th>Falhou</th></tr>");
+        let _ = write!(
+            h,
+            "<details><summary>{}</summary><div class=\"table-wrap\"><table><tr><th>ID</th><th>{}</th><th>{}</th><th>{}</th><th>{}</th><th>{}</th><th>{}</th></tr>",
+            e(t("All SMART attributes", "Todos os atributos SMART")),
+            e(t("Name", "Nome")),
+            e(t("Value", "Valor")),
+            e(t("Worst", "Pior")),
+            e(t("Threshold", "Limite")),
+            e(t("Raw", "Bruto")),
+            e(t("Failed", "Falhou"))
+        );
         for a in &s.attributes {
             let _ = write!(
                 h,
@@ -396,24 +490,28 @@ fn smart_html(h: &mut String, s: &SmartReport) {
 fn latency_html(h: &mut String, l: &LatencySummary) {
     let _ = write!(
         h,
-        "<p class=\"muted\">Latência: mín {} · média {} · p50 {} · p95 {} · p99 {} · máx {}</p>",
-        format_ms(l.min_ms),
-        format_ms(l.avg_ms),
-        format_ms(l.p50_ms),
-        format_ms(l.p95_ms),
-        format_ms(l.p99_ms),
-        format_ms(l.max_ms)
+        "<p class=\"muted\">{}</p>",
+        e(&tr!(
+            "Latency: min {} · avg {} · p50 {} · p95 {} · p99 {} · max {}",
+            "Latência: mín {} · média {} · p50 {} · p95 {} · p99 {} · máx {}",
+            format_ms(l.min_ms),
+            format_ms(l.avg_ms),
+            format_ms(l.p50_ms),
+            format_ms(l.p95_ms),
+            format_ms(l.p99_ms),
+            format_ms(l.max_ms)
+        ))
     );
     let max = l.buckets.iter().map(|b| b.count).max().unwrap_or(0).max(1);
-    h.push_str("<table><tr><th>Faixa</th><th class=\"num\">Leituras</th><th style=\"width:60%\"></th></tr>");
+    let _ = write!(h, "<table><tr><th>{}</th><th class=\"num\">{}</th><th style=\"width:60%\"></th></tr>", e(t("Range", "Faixa")), e(t("Reads", "Leituras")));
     for b in &l.buckets {
         let pct = if b.count == 0 { 0.0 } else { (b.count as f64 / max as f64 * 100.0).max(0.5) };
+        // CSS needs a dot as decimal separator whatever the language.
         let _ = write!(
             h,
-            "<tr><td>{}</td><td class=\"num\">{}</td><td><div class=\"bar\" style=\"width:{}%\"></div></td></tr>",
+            "<tr><td>{}</td><td class=\"num\">{}</td><td><div class=\"bar\" style=\"width:{pct:.1}%\"></div></td></tr>",
             e(&b.label),
-            int(b.count),
-            decimal(pct, 1).replace(',', ".")
+            int(b.count)
         );
     }
     h.push_str("</table>");
@@ -426,36 +524,63 @@ fn scan_html(h: &mut String, s: &ScanResult) {
         "<div class=\"card\"><h3>{} — {}</h3><p class=\"muted\">{} → {} · {}</p>",
         e(&s.disk.title()),
         e(&m.status.label()),
-        s.started_at.with_timezone(&Local).format("%d/%m/%Y %H:%M"),
-        s.finished_at.with_timezone(&Local).format("%d/%m/%Y %H:%M"),
+        e(&local_datetime(s.started_at)),
+        e(&local_datetime(s.finished_at)),
         e(&format_duration(Duration::from_secs_f64(m.wall_seconds)))
     );
-    let rows: Vec<(&str, String)> = vec![
-        ("Faixa lida", format!("{} de {} ({} por leitura)", format_bytes(m.bytes_processed), format_bytes(m.bytes_planned), format_bytes_binary(m.block_size as u64))),
-        ("Velocidade média", format_mbps(m.avg_mb_per_s)),
-        (
-            "Velocidade por região",
-            format!(
-                "mín {} · mediana {} · máx {}",
-                m.min_segment_mb_per_s.map(format_mbps).unwrap_or("—".into()),
-                m.median_segment_mb_per_s.map(format_mbps).unwrap_or("—".into()),
-                m.max_segment_mb_per_s.map(format_mbps).unwrap_or("—".into())
+    let na = || "—".to_string();
+    kv(
+        h,
+        vec![
+            (
+                t("Range read", "Faixa lida"),
+                tr!(
+                    "{} of {} ({} per read)",
+                    "{} de {} ({} por leitura)",
+                    format_bytes(m.bytes_processed),
+                    format_bytes(m.bytes_planned),
+                    format_bytes_binary(m.block_size as u64)
+                ),
             ),
-        ),
-        ("Leituras lentas (≥ limite)", int(m.slow_blocks)),
-        ("Erros de leitura", format!("{} ({} de mídia, {} de dispositivo, {} transitórios)", int(m.error_blocks), int(m.media_errors), int(m.device_errors), int(m.transient_errors))),
-        ("Timeouts", int(m.timeout_blocks)),
-        ("Dados ilegíveis", format_bytes(m.bytes_unreadable)),
-    ];
-    h.push_str("<dl class=\"kv\">");
-    for (k, v) in rows {
-        let _ = write!(h, "<dt>{}</dt><dd>{}</dd>", e(k), e(&v));
-    }
-    h.push_str("</dl>");
+            (t("Average speed", "Velocidade média"), format_mbps(m.avg_mb_per_s)),
+            (
+                t("Speed by region", "Velocidade por região"),
+                tr!(
+                    "min {} · median {} · max {}",
+                    "mín {} · mediana {} · máx {}",
+                    m.min_segment_mb_per_s.map(format_mbps).unwrap_or_else(na),
+                    m.median_segment_mb_per_s.map(format_mbps).unwrap_or_else(na),
+                    m.max_segment_mb_per_s.map(format_mbps).unwrap_or_else(na)
+                ),
+            ),
+            (t("Slow reads (≥ threshold)", "Leituras lentas (≥ limite)"), int(m.slow_blocks)),
+            (
+                t("Read errors", "Erros de leitura"),
+                tr!(
+                    "{} ({} media, {} device, {} transient)",
+                    "{} ({} de mídia, {} de dispositivo, {} transitórios)",
+                    int(m.error_blocks),
+                    int(m.media_errors),
+                    int(m.device_errors),
+                    int(m.transient_errors)
+                ),
+            ),
+            ("Timeouts", int(m.timeout_blocks)),
+            (t("Unreadable data", "Dados ilegíveis"), format_bytes(m.bytes_unreadable)),
+        ],
+    );
     h.push_str(&timeline_svg(&m.timeline));
     latency_html(h, &m.latency);
     if !m.bad_ranges.is_empty() {
-        h.push_str("<h3>Regiões ilegíveis</h3><table><tr><th>LBA inicial</th><th class=\"num\">Setores</th><th>Tamanho</th><th>Isolada</th></tr>");
+        let _ = write!(
+            h,
+            "<h3>{}</h3><table><tr><th>{}</th><th class=\"num\">{}</th><th>{}</th><th>{}</th></tr>",
+            e(t("Unreadable regions", "Regiões ilegíveis")),
+            e(t("First LBA", "LBA inicial")),
+            e(t("Sectors", "Setores")),
+            e(t("Size", "Tamanho")),
+            e(t("Isolated", "Isolada"))
+        );
         for b in m.bad_ranges.iter().take(200) {
             let _ = write!(
                 h,
@@ -463,14 +588,21 @@ fn scan_html(h: &mut String, s: &ScanResult) {
                 int(b.first_lba),
                 int(b.sector_count),
                 format_bytes(b.length),
-                if b.refined { "sim" } else { "não (orçamento de releitura esgotado)" }
+                e(if b.refined { t("yes", "sim") } else { t("no (re-read budget exhausted)", "não (orçamento de releitura esgotado)") })
             );
         }
         h.push_str("</table>");
     }
     let important: Vec<_> = m.issues.iter().filter(|i| i.kind != crate::scan::IssueKind::Slow).take(100).collect();
     if !important.is_empty() {
-        h.push_str("<details><summary>Ocorrências de erro/timeout</summary><table><tr><th>LBA</th><th>Tipo</th><th>Latência</th><th>Descrição</th></tr>");
+        let _ = write!(
+            h,
+            "<details><summary>{}</summary><table><tr><th>LBA</th><th>{}</th><th>{}</th><th>{}</th></tr>",
+            e(t("Error/timeout occurrences", "Ocorrências de erro/timeout")),
+            e(t("Type", "Tipo")),
+            e(t("Latency", "Latência")),
+            e(t("Description", "Descrição"))
+        );
         for i in important {
             let _ = write!(h, "<tr><td>{}</td><td>{:?}</td><td>{}</td><td>{}</td></tr>", int(i.lba), i.kind, format_ms(i.latency_ms), e(&i.description));
         }
@@ -483,21 +615,35 @@ fn capacity_html(h: &mut String, c: &crate::capacity::CapacityResult) {
     let m = &c.metrics;
     let _ = write!(
         h,
-        "<div class=\"card\"><h3>{} — {}</h3><p class=\"muted\">{} · volume {} ({}) · {}</p><dl class=\"kv\">",
+        "<div class=\"card\"><h3>{} — {}</h3><p class=\"muted\">{}</p>",
         e(&c.disk.title()),
         e(m.verdict.label()),
-        c.finished_at.with_timezone(&Local).format("%d/%m/%Y %H:%M"),
-        e(&c.volume),
-        e(c.file_system.as_deref().unwrap_or("?")),
-        e(&m.status.label())
+        e(&tr!(
+            "{} · volume {} ({}) · {}",
+            "{} · volume {} ({}) · {}",
+            local_datetime(c.finished_at),
+            c.volume,
+            c.file_system.as_deref().unwrap_or("?"),
+            m.status.label()
+        ))
     );
     let mut rows: Vec<(&str, String)> = vec![
-        ("Gravado", format!("{} de {} planejados · {}", format_bytes(m.written_bytes), format_bytes(m.planned_bytes), format_mbps(m.write_mb_per_s))),
-        ("Conferido", format!("{} · {}", format_bytes(m.verified_bytes), format_mbps(m.read_mb_per_s))),
-        ("Correto", format_bytes(m.ok_bytes)),
         (
-            "Problemas",
-            format!(
+            t("Written", "Gravado"),
+            tr!(
+                "{} of {} planned · {}",
+                "{} de {} planejados · {}",
+                format_bytes(m.written_bytes),
+                format_bytes(m.planned_bytes),
+                format_mbps(m.write_mb_per_s)
+            ),
+        ),
+        (t("Verified", "Conferido"), format!("{} · {}", format_bytes(m.verified_bytes), format_mbps(m.read_mb_per_s))),
+        (t("Correct", "Correto"), format_bytes(m.ok_bytes)),
+        (
+            t("Problems", "Problemas"),
+            tr!(
+                "overwritten {} · lost {} · corrupted {} · unreadable {} · write failures {}",
                 "sobrescritos {} · perdidos {} · corrompidos {} · ilegíveis {} · falhas de gravação {}",
                 format_bytes(m.overwritten_bytes),
                 format_bytes(m.lost_bytes),
@@ -506,18 +652,22 @@ fn capacity_html(h: &mut String, c: &crate::capacity::CapacityResult) {
                 int(m.write_errors)
             ),
         ),
-        ("Não testado", format!("{} já ocupados antes do teste", format_bytes(c.used_before))),
+        (
+            t("Not tested", "Não testado"),
+            tr!("{} already in use before the test", "{} já ocupados antes do teste", format_bytes(c.used_before)),
+        ),
     ];
     if let Some(real) = c.estimated_real_capacity {
-        rows.push(("Capacidade real estimada", format!("{} (anunciada: {})", format_bytes(real), format_bytes(c.disk.size_bytes))));
+        rows.push((
+            t("Estimated real capacity", "Capacidade real estimada"),
+            tr!("{} (advertised: {})", "{} (anunciada: {})", format_bytes(real), format_bytes(c.disk.size_bytes)),
+        ));
     }
-    for (k, v) in rows {
-        let _ = write!(h, "<dt>{}</dt><dd>{}</dd>", e(k), e(&v));
-    }
-    h.push_str("</dl></div>");
+    kv(h, rows);
+    h.push_str("</div>");
 }
 
-/// Gráfico SVG da velocidade de leitura ao longo do disco.
+/// SVG chart of the read speed across the drive.
 pub fn timeline_svg(points: &[TimelinePoint]) -> String {
     if points.is_empty() {
         return String::new();
@@ -527,7 +677,10 @@ pub fn timeline_svg(points: &[TimelinePoint]) -> String {
     let max = points.iter().map(|p| p.mb_per_s).fold(0.0_f64, f64::max).max(1.0) * 1.1;
     let x = |pct: f64| left + pct.clamp(0.0, 100.0) / 100.0 * pw;
     let y = |v: f64| top + (1.0 - (v / max).clamp(0.0, 1.0)) * ph;
-    let mut s = format!("<svg viewBox=\"0 0 {w} {ht}\" width=\"100%\" role=\"img\" aria-label=\"Velocidade de leitura ao longo do disco\">");
+    let mut s = format!(
+        "<svg viewBox=\"0 0 {w} {ht}\" width=\"100%\" role=\"img\" aria-label=\"{}\">",
+        e(t("Read speed across the drive", "Velocidade de leitura ao longo do disco"))
+    );
     for frac in [0.0, 0.5, 1.0] {
         let v = max / 1.1 * frac;
         let _ = write!(
@@ -552,17 +705,34 @@ pub fn timeline_svg(points: &[TimelinePoint]) -> String {
     for p in points.iter().filter(|p| p.slow > 0) {
         let _ = write!(s, "<circle class=\"slow\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"3\"/>", x(p.percent), y(p.mb_per_s));
     }
-    s.push_str("</svg><p class=\"muted\">Linha: velocidade por região do disco (0% = início). Traços vermelhos: erros/timeouts. Pontos laranja: leituras lentas.</p>");
+    let _ = write!(
+        s,
+        "</svg><p class=\"muted\">{}</p>",
+        e(t(
+            "Line: speed by region of the drive (0% = start). Red marks: errors/timeouts. Orange dots: slow reads.",
+            "Linha: velocidade por região do disco (0% = início). Traços vermelhos: erros/timeouts. Pontos laranja: leituras lentas.",
+        ))
+    );
     s
 }
 
 fn bench_table(h: &mut String, title: &str, m: &BenchMetrics) {
-    let _ = write!(h, "<h4>{} — {}</h4><table><tr><th>Teste</th><th class=\"num\">Velocidade</th><th class=\"num\">IOPS</th><th class=\"num\">Lat. média</th><th class=\"num\">p99</th><th class=\"num\">Máx</th><th class=\"num\">Erros</th></tr>", e(title), e(&m.status.label()));
+    let _ = write!(
+        h,
+        "<h4>{} — {}</h4><table><tr><th>{}</th><th class=\"num\">{}</th><th class=\"num\">IOPS</th><th class=\"num\">{}</th><th class=\"num\">p99</th><th class=\"num\">{}</th><th class=\"num\">{}</th></tr>",
+        e(title),
+        e(&m.status.label()),
+        e(t("Test", "Teste")),
+        e(t("Speed", "Velocidade")),
+        e(t("Avg latency", "Lat. média")),
+        e(t("Max", "Máx")),
+        e(t("Errors", "Erros"))
+    );
     for s in &m.sequential {
         let _ = write!(
             h,
             "<tr><td>{}</td><td class=\"num\">{}</td><td class=\"num\">—</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td></tr>",
-            e(&s.label),
+            e(&display_label(&s.label)),
             format_mbps(s.mb_per_s),
             format_ms(s.latency.avg_ms),
             format_ms(s.latency.p99_ms),
@@ -574,7 +744,7 @@ fn bench_table(h: &mut String, title: &str, m: &BenchMetrics) {
         let _ = write!(
             h,
             "<tr><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td></tr>",
-            e(&r.label),
+            e(&display_label(&r.label)),
             format_mbps(r.mb_per_s),
             int(r.iops.round() as u64),
             format_ms(r.latency.avg_ms),
@@ -590,10 +760,11 @@ fn bench_table(h: &mut String, title: &str, m: &BenchMetrics) {
 mod tests {
     use super::*;
     use crate::analysis::{AnalysisResult, Confidence, DiskVerdict, Evidence, EvidenceSource};
+    use crate::i18n::scoped;
     use crate::report::standard_limitations;
     use chrono::Utc;
 
-    fn sample_report() -> DiagnosticReport {
+    fn sample_report(language: Lang) -> DiagnosticReport {
         let disks = crate::inventory::tests::fixture_disks();
         let finding = Finding {
             rule: "comm.link".into(),
@@ -601,14 +772,15 @@ mod tests {
             severity: Severity::Warning,
             confidence: Confidence::Medium,
             confidence_basis: "x".into(),
-            title: "Falhas <de> comunicação".into(),
+            title: "Communication <failures>".into(),
             evidence: vec![Evidence { source: EvidenceSource::Events, weight: 2, text: "<script>alert('x')</script>".into() }],
-            possible_causes: vec!["cabo".into()],
-            recommendations: vec!["troque o cabo".into()],
+            possible_causes: vec!["cable".into()],
+            recommendations: vec!["replace the cable".into()],
         };
         DiagnosticReport {
             tool: "diskdoctor".into(),
             version: "0.1.0".into(),
+            language,
             generated_at: Utc::now(),
             computer: Some("PC<1>".into()),
             elevated: false,
@@ -622,15 +794,16 @@ mod tests {
             analysis: AnalysisResult {
                 verdicts: vec![DiskVerdict {
                     disk_number: 2,
-                    label: "Disco 2".into(),
+                    label: "Drive 2".into(),
                     status: DiskStatus::Warning,
                     headline: "h".into(),
                     findings: vec![finding],
                     sources_used: vec!["SMART".into()],
-                    gaps: vec!["sem scan".into()],
+                    gaps: vec!["no scan".into()],
+                    change: None,
                 }],
                 global_findings: vec![],
-                notes: vec!["SMART normal não garante".into()],
+                notes: vec!["Normal SMART does not guarantee".into()],
             },
             disks,
             limitations: standard_limitations(),
@@ -640,17 +813,28 @@ mod tests {
 
     #[test]
     fn renders_and_escapes_everything() {
-        let html = render(&sample_report());
+        let _en = scoped(Lang::En);
+        let html = render(&sample_report(Lang::En));
         assert!(html.starts_with("<!doctype html>"));
-        assert!(html.contains("lang=\"pt-BR\""));
-        assert!(!html.contains("<script>"), "texto do sistema deve ser escapado");
+        assert!(html.contains("lang=\"en\""));
+        assert!(!html.contains("<script>"), "system text must be escaped");
         assert!(html.contains("&lt;script&gt;"));
-        assert!(html.contains("Falhas &lt;de&gt; comunicação"));
+        assert!(html.contains("Communication &lt;failures&gt;"));
         assert!(html.contains("PC&lt;1&gt;"));
         assert!(html.contains("KINGSTON SA400S37120G"));
+        assert!(html.contains("Limitations and warnings"));
+        assert!(!html.contains("50026B7600000002"), "the full serial never appears");
+        assert!(!html.contains("<link") && !html.contains("src=\"http"), "no external resources");
+    }
+
+    #[test]
+    fn renders_in_portuguese_with_english_technical_names() {
+        let _pt = scoped(Lang::PtBr);
+        let html = render(&sample_report(Lang::PtBr));
+        assert!(html.contains("lang=\"pt-BR\""));
         assert!(html.contains("Limitações e avisos"));
-        assert!(!html.contains("50026B7600000002"), "serial completo nunca aparece");
-        assert!(!html.contains("<link") && !html.contains("src=\"http"), "sem recursos externos");
+        assert!(html.contains("<h2>Surface Scan</h2>"));
+        assert!(html.contains("Surface Scan"), "technical names stay in English");
     }
 
     #[test]

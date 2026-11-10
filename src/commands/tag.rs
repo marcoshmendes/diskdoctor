@@ -1,10 +1,11 @@
-//! `diskdoctor tag` — apelidos ("Studio", "Jogos") para os discos.
+//! `diskdoctor tag` — nicknames ("Studio", "Games") for the drives.
 //!
-//! Grava só `tags.json` na pasta de dados do diskdoctor (ver [`crate::tags`]).
+//! Writes only `tags.json` in the diskdoctor data folder (see [`crate::tags`]).
 
 use super::{Ctx, load_disks, print_json, select_disk};
 use crate::app::exit;
 use crate::cli::{TagAction, TagAddArgs, TagArgs, TagRemoveArgs};
+use crate::i18n::t;
 use crate::inventory::{DiskInfo, disk_title};
 use crate::tags::{TagBook, TagStore, normalize_tag, quote_for_cli, same_tag};
 use crate::ui;
@@ -21,7 +22,7 @@ pub fn run(ctx: &Ctx, args: &TagArgs) -> Result<u8> {
     }
 }
 
-/// Linha da listagem: disco conectado (com ou sem tags) ou disco com tags que não está conectado.
+/// Listing row: a connected drive (with or without tags) or a tagged drive that is not connected.
 #[derive(Serialize)]
 struct TagRow {
     number: Option<u32>,
@@ -65,7 +66,7 @@ fn rows(disks: &[DiskInfo], book: &TagBook) -> Vec<TagRow> {
     out
 }
 
-/// Tags presentes em mais de um disco conectado (não servem para `--disk`).
+/// Tags on more than one connected drive (they cannot be used in `--disk`).
 fn shared_tags(disks: &[DiskInfo]) -> Vec<(String, Vec<u32>)> {
     let mut out: Vec<(String, Vec<u32>)> = Vec::new();
     for d in disks {
@@ -83,7 +84,10 @@ fn shared_tags(disks: &[DiskInfo]) -> Vec<(String, Vec<u32>)> {
 fn warn_shared(disks: &[DiskInfo]) {
     for (tag, nums) in shared_tags(disks) {
         let list = nums.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
-        ui::warn(&format!("a tag \"{tag}\" está nos discos {list}; enquanto for compartilhada, use o número em --disk"));
+        ui::warn(&tr!(
+            "the tag \"{tag}\" is on drives {list}; while it is shared, use the number in --disk",
+            "a tag \"{tag}\" está nos discos {list}; enquanto for compartilhada, use o número em --disk"
+        ));
     }
 }
 
@@ -96,13 +100,13 @@ fn list(ctx: &Ctx) -> Result<u8> {
         print_json(&serde_json::json!({ "file": store.path(), "disks": rows }))?;
         return Ok(exit::OK);
     }
-    ui::heading("Tags dos discos");
-    let mut t = ui::table();
-    t.set_header(vec!["#", "Tags", "Modelo", "Capacidade", "Volumes"]);
+    ui::heading(t("Drive Tags", "Tags dos discos"));
+    let mut tb = ui::table();
+    tb.set_header(vec!["#", "Tags", t("Model", "Modelo"), t("Capacity", "Capacidade"), "Volumes"]);
     for r in &rows {
         let tags = if r.tags.is_empty() { ui::dim("—") } else { ui::tag_list(&r.tags) };
-        let model = if r.connected { r.model.clone() } else { format!("{}\n(não conectado)", r.model) };
-        t.add_row(vec![
+        let model = if r.connected { r.model.clone() } else { tr!("{}\n(not connected)", "{}\n(não conectado)", r.model) };
+        tb.add_row(vec![
             Cell::new(r.number.map(|n| n.to_string()).unwrap_or("—".into())),
             Cell::new(tags),
             Cell::new(model),
@@ -110,12 +114,16 @@ fn list(ctx: &Ctx) -> Result<u8> {
             Cell::new(if r.volumes.is_empty() { "—".into() } else { r.volumes.join(" ") }),
         ]);
     }
-    println!("{t}");
+    println!("{tb}");
     warn_shared(&disks);
     if book.disks.is_empty() {
-        ui::note("Nenhuma tag ainda. Exemplo: diskdoctor tag add --disk 2 Studio");
+        ui::note(t("No tags yet. Example: diskdoctor tag add --disk 2 Studio", "Nenhuma tag ainda. Exemplo: diskdoctor tag add --disk 2 Studio"));
     } else if let Some(example) = disks.iter().find_map(|d| d.tags.first()) {
-        ui::note(&format!("Use a tag no lugar do número: diskdoctor health --disk {}", quote_for_cli(example)));
+        ui::note(&tr!(
+            "Use a tag instead of the number: diskdoctor health --disk {}",
+            "Use a tag no lugar do número: diskdoctor health --disk {}",
+            quote_for_cli(example)
+        ));
     }
     Ok(exit::OK)
 }
@@ -127,7 +135,7 @@ fn add(ctx: &Ctx, a: &TagAddArgs) -> Result<u8> {
     let mut disks = load_disks(ctx)?;
     let disk = select_disk(&disks, &a.disk)?.clone();
     let added = book.add(&disk, &tags)?;
-    store.save(&book).context("as tags não foram salvas")?;
+    store.save(&book).context(t("the tags were not saved", "as tags não foram salvas"))?;
     book.apply(&mut disks);
     let current = book.tags_for(&disk.fingerprint).to_vec();
 
@@ -137,13 +145,13 @@ fn add(ctx: &Ctx, a: &TagAddArgs) -> Result<u8> {
     }
     let title = disk_title(disk.number, &disk.model, &current);
     if added.is_empty() {
-        println!("{} {title} — nenhuma tag nova (já existiam).", ui::ok_mark());
+        println!("{} {title} — {}", ui::ok_mark(), t("no new tags (they already existed).", "nenhuma tag nova (já existiam)."));
     } else {
         println!("{} {title}", ui::ok_mark());
-        println!("  Adicionada{}: {}", if added.len() > 1 { "s" } else { "" }, ui::tag_list(&added));
+        println!("  {} {}", if added.len() > 1 { t("Added:", "Adicionadas:") } else { t("Added:", "Adicionada:") }, ui::tag_list(&added));
     }
     warn_shared(&disks);
-    ui::note(&format!("Agora você pode usar: diskdoctor health --disk {}", quote_for_cli(&tags[0])));
+    ui::note(&tr!("Now you can use: diskdoctor health --disk {}", "Agora você pode usar: diskdoctor health --disk {}", quote_for_cli(&tags[0])));
     Ok(exit::OK)
 }
 
@@ -154,7 +162,7 @@ fn remove(ctx: &Ctx, a: &TagRemoveArgs) -> Result<u8> {
     let disk = select_disk(&disks, &a.disk)?.clone();
     let removed = if a.all { book.clear(&disk.fingerprint) } else { book.remove(&disk.fingerprint, &a.tags) };
     if !removed.is_empty() {
-        store.save(&book).context("as tags não foram salvas")?;
+        store.save(&book).context(t("the tags were not saved", "as tags não foram salvas"))?;
     }
     let missing: Vec<&String> = a.tags.iter().filter(|t| !removed.iter().any(|r| same_tag(r, t))).collect();
     let current = book.tags_for(&disk.fingerprint).to_vec();
@@ -165,13 +173,13 @@ fn remove(ctx: &Ctx, a: &TagRemoveArgs) -> Result<u8> {
     }
     let title = disk_title(disk.number, &disk.model, &current);
     if removed.is_empty() {
-        println!("{title} — nada removido.");
+        println!("{title} — {}", t("nothing removed.", "nada removido."));
     } else {
         println!("{} {title}", ui::ok_mark());
-        println!("  Removida{}: {}", if removed.len() > 1 { "s" } else { "" }, ui::tag_list(&removed));
+        println!("  {} {}", if removed.len() > 1 { t("Removed:", "Removidas:") } else { t("Removed:", "Removida:") }, ui::tag_list(&removed));
     }
     for m in missing {
-        ui::warn(&format!("o disco {} não tinha a tag \"{m}\"", disk.number));
+        ui::warn(&tr!("drive {} did not have the tag \"{m}\"", "o disco {} não tinha a tag \"{m}\"", disk.number));
     }
     Ok(exit::OK)
 }
@@ -188,13 +196,13 @@ mod tests {
         book.add(&disks[1], &["Windows".to_string()]).unwrap();
         book.add(&disks[2], &["Studio".to_string(), "windows".to_string()]).unwrap();
         let gone = disks.remove(0);
-        book.add(&gone, &["Jogos".to_string()]).unwrap();
+        book.add(&gone, &["Games".to_string()]).unwrap();
         book.apply(&mut disks);
 
         let r = rows(&disks, &book);
         assert_eq!(r.len(), 3);
         let disconnected = r.iter().find(|x| !x.connected).unwrap();
-        assert_eq!(disconnected.tags, vec!["Jogos"]);
+        assert_eq!(disconnected.tags, vec!["Games"]);
         assert_eq!(disconnected.number, None);
 
         let shared = shared_tags(&disks);

@@ -1,11 +1,11 @@
-//! Tags (apelidos) que o usuário dá aos discos: "Studio", "Jogos", "Backup"…
+//! Tags (nicknames) the user gives to drives: "Studio", "Games", "Backup"…
 //!
-//! Ficam em `<pasta de dados>\tags.json`, associadas ao **fingerprint** do disco (hash de
-//! modelo + serial), e não ao número: o número do disco no Windows pode mudar entre
-//! reinicializações ou quando um disco é conectado em outra porta.
+//! Stored in `<data folder>\tags.json`, bound to the drive **fingerprint** (hash of model +
+//! serial) rather than its number: the Windows drive number can change between reboots or
+//! when a drive is plugged into another port.
 //!
-//! As tags também servem para escolher o disco: `--disk studio` em vez de `--disk 2`
-//! ([`DiskRef`]). Para isso não haver ambiguidade, uma tag não pode ser só dígitos.
+//! Tags also select a drive: `--disk studio` instead of `--disk 2` ([`DiskRef`]). To keep
+//! that unambiguous, a tag cannot be digits only.
 
 use crate::inventory::DiskInfo;
 use anyhow::{Context, Result, bail};
@@ -22,7 +22,7 @@ pub const MAX_TAGS_PER_DISK: usize = 10;
 const FILE_NAME: &str = "tags.json";
 const FORMAT_VERSION: u32 = 1;
 
-/// Chave de comparação: espaços colapsados e minúsculas ("  studio " == "Studio").
+/// Comparison key: collapsed spaces and lower case ("  studio " == "Studio").
 fn tag_key(tag: &str) -> String {
     tag.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
@@ -31,33 +31,42 @@ pub fn same_tag(a: &str, b: &str) -> bool {
     tag_key(a) == tag_key(b)
 }
 
-/// Valida e normaliza uma tag nova.
+/// Validates and normalizes a new tag.
 ///
-/// Regras: espaços aparados e colapsados; 1 a 32 caracteres; só letras (com acento),
-/// dígitos, espaço, `-`, `_` e `.`; não pode começar com `-` (seria lida como opção) nem
-/// ser só dígitos (seria confundida com o número do disco em `--disk`).
+/// Rules: spaces trimmed and collapsed; 1 to 32 characters; only letters (accents
+/// allowed), digits, space, `-`, `_` and `.`; it cannot start with `-` (it would be read as
+/// an option) nor be digits only (it would be mistaken for the drive number in `--disk`).
 pub fn normalize_tag(raw: &str) -> Result<String> {
     let tag = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     if tag.is_empty() {
-        bail!("tag vazia");
+        bail!(crate::i18n::t("empty tag", "tag vazia"));
     }
     let len = tag.chars().count();
     if len > MAX_TAG_CHARS {
-        bail!("a tag \"{tag}\" tem {len} caracteres; o máximo é {MAX_TAG_CHARS}");
+        bail!(tr!(
+            "the tag \"{tag}\" has {len} characters; the maximum is {MAX_TAG_CHARS}",
+            "a tag \"{tag}\" tem {len} caracteres; o máximo é {MAX_TAG_CHARS}"
+        ));
     }
     if let Some(c) = tag.chars().find(|c| !(c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))) {
-        bail!("a tag \"{tag}\" tem o caractere '{c}', que não é aceito. Use letras, números, espaço, '-', '_' ou '.'");
+        bail!(tr!(
+            "the tag \"{tag}\" has the character '{c}', which is not allowed. Use letters, digits, space, '-', '_' or '.'",
+            "a tag \"{tag}\" tem o caractere '{c}', que não é aceito. Use letras, números, espaço, '-', '_' ou '.'"
+        ));
     }
     if tag.starts_with('-') {
-        bail!("a tag \"{tag}\" não pode começar com '-'");
+        bail!(tr!("the tag \"{tag}\" cannot start with '-'", "a tag \"{tag}\" não pode começar com '-'"));
     }
     if tag.chars().all(|c| c.is_ascii_digit()) {
-        bail!("a tag \"{tag}\" não pode ser só números (seria confundida com o número do disco)");
+        bail!(tr!(
+            "the tag \"{tag}\" cannot be digits only (it would be mistaken for the drive number)",
+            "a tag \"{tag}\" não pode ser só números (seria confundida com o número do disco)"
+        ));
     }
     Ok(tag)
 }
 
-/// Tags de um disco, com a última identificação vista (para listar discos desconectados).
+/// Tags of a drive, with the last identification seen (to list disconnected drives).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TaggedDisk {
     pub tags: Vec<String>,
@@ -67,7 +76,7 @@ pub struct TaggedDisk {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Conteúdo de `tags.json`: fingerprint → tags.
+/// Content of `tags.json`: fingerprint → tags.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TagBook {
     pub version: u32,
@@ -86,8 +95,8 @@ impl TagBook {
         self.disks.get(fingerprint).map(|d| d.tags.as_slice()).unwrap_or(&[])
     }
 
-    /// Adiciona tags já normalizadas. Uma tag que já existe com outra grafia passa a usar a
-    /// grafia nova (permite corrigir maiúsculas). Retorna as tags que eram novas.
+    /// Adds already normalized tags. A tag that exists with another spelling takes the new
+    /// spelling (lets the user fix capitalization). Returns the tags that were new.
     pub fn add(&mut self, disk: &DiskInfo, tags: &[String]) -> Result<Vec<String>> {
         let mut list = self.tags_for(&disk.fingerprint).to_vec();
         let mut added = Vec::new();
@@ -101,7 +110,11 @@ impl TagBook {
             }
         }
         if list.len() > MAX_TAGS_PER_DISK {
-            bail!("um disco pode ter no máximo {MAX_TAGS_PER_DISK} tags (ficaria com {})", list.len());
+            bail!(tr!(
+                "a drive can have at most {MAX_TAGS_PER_DISK} tags (it would have {})",
+                "um disco pode ter no máximo {MAX_TAGS_PER_DISK} tags (ficaria com {})",
+                list.len()
+            ));
         }
         self.disks.insert(
             disk.fingerprint.clone(),
@@ -116,8 +129,8 @@ impl TagBook {
         Ok(added)
     }
 
-    /// Remove as tags indicadas (comparação sem diferenciar maiúsculas). Retorna as removidas.
-    /// O disco sai do arquivo quando fica sem tags.
+    /// Removes the given tags (case-insensitive). Returns the removed ones. The drive leaves
+    /// the file when it has no tags left.
     pub fn remove(&mut self, fingerprint: &str, tags: &[String]) -> Vec<String> {
         let Some(entry) = self.disks.get_mut(fingerprint) else { return vec![] };
         let mut removed = Vec::new();
@@ -137,12 +150,12 @@ impl TagBook {
         removed
     }
 
-    /// Remove todas as tags do disco. Retorna as removidas.
+    /// Removes every tag of the drive. Returns the removed ones.
     pub fn clear(&mut self, fingerprint: &str) -> Vec<String> {
         self.disks.remove(fingerprint).map(|d| d.tags).unwrap_or_default()
     }
 
-    /// Preenche `DiskInfo::tags` dos discos conectados.
+    /// Fills `DiskInfo::tags` of the connected drives.
     pub fn apply(&self, disks: &mut [DiskInfo]) {
         for d in disks {
             d.tags = self.tags_for(&d.fingerprint).to_vec();
@@ -150,7 +163,7 @@ impl TagBook {
     }
 }
 
-/// Leitura e gravação de `tags.json` na pasta de dados.
+/// Reads and writes `tags.json` in the data folder.
 pub struct TagStore {
     path: PathBuf,
 }
@@ -164,34 +177,39 @@ impl TagStore {
         &self.path
     }
 
-    /// Arquivo inexistente = nenhuma tag. Arquivo ilegível é erro (nunca é sobrescrito às cegas).
+    /// Missing file = no tags. An unreadable file is an error (never overwritten blindly).
     pub fn load(&self) -> Result<TagBook> {
         let text = match fs::read_to_string(&self.path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(TagBook::default()),
-            Err(e) => return Err(e).with_context(|| format!("não foi possível ler {}", self.path.display())),
+            Err(e) => return Err(e).with_context(|| tr!("could not read {}", "não foi possível ler {}", self.path.display())),
         };
-        let book: TagBook = serde_json::from_str(&text)
-            .with_context(|| format!("{} está corrompido; corrija ou apague o arquivo para recomeçar as tags", self.path.display()))?;
+        let book: TagBook = serde_json::from_str(&text).with_context(|| {
+            tr!(
+                "{} is corrupted; fix or delete the file to start the tags over",
+                "{} está corrompido; corrija ou apague o arquivo para recomeçar as tags",
+                self.path.display()
+            )
+        })?;
         if book.version > FORMAT_VERSION {
-            bail!("{} foi gravado por uma versão mais nova do diskdoctor", self.path.display());
+            bail!(tr!("{} was written by a newer diskdoctor version", "{} foi gravado por uma versão mais nova do diskdoctor", self.path.display()));
         }
         Ok(book)
     }
 
-    /// Grava em arquivo temporário e renomeia, para não deixar `tags.json` pela metade.
+    /// Writes to a temporary file and renames it, so `tags.json` is never left half-written.
     pub fn save(&self, book: &TagBook) -> Result<()> {
         if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir).with_context(|| format!("não foi possível criar {}", dir.display()))?;
+            fs::create_dir_all(dir).with_context(|| tr!("could not create {}", "não foi possível criar {}", dir.display()))?;
         }
         let tmp = self.path.with_extension("json.tmp");
-        fs::write(&tmp, serde_json::to_string_pretty(book)?).with_context(|| format!("não foi possível gravar {}", tmp.display()))?;
-        fs::rename(&tmp, &self.path).with_context(|| format!("não foi possível gravar {}", self.path.display()))?;
+        fs::write(&tmp, serde_json::to_string_pretty(book)?).with_context(|| tr!("could not write {}", "não foi possível gravar {}", tmp.display()))?;
+        fs::rename(&tmp, &self.path).with_context(|| tr!("could not write {}", "não foi possível gravar {}", self.path.display()))?;
         Ok(())
     }
 }
 
-/// Como o usuário escolhe um disco em `--disk`: pelo número ou por uma tag.
+/// How the user picks a drive in `--disk`: by number or by tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiskRef {
     Number(u32),
@@ -204,10 +222,10 @@ impl FromStr for DiskRef {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let t = s.trim();
         if t.is_empty() {
-            return Err("informe o número do disco ou uma tag".into());
+            return Err(crate::i18n::t("give the drive number or a tag", "informe o número do disco ou uma tag").into());
         }
         if t.chars().all(|c| c.is_ascii_digit()) {
-            return t.parse().map(Self::Number).map_err(|_| format!("número de disco inválido: {t}"));
+            return t.parse().map(Self::Number).map_err(|_| tr!("invalid drive number: {t}", "número de disco inválido: {t}"));
         }
         Ok(Self::Tag(t.to_string()))
     }
@@ -223,12 +241,15 @@ impl fmt::Display for DiskRef {
 }
 
 impl DiskRef {
-    /// Encontra o disco conectado. Uma tag precisa estar em exatamente um disco.
+    /// Finds the connected drive. A tag must be on exactly one drive.
     pub fn resolve<'a>(&self, disks: &'a [DiskInfo]) -> Result<&'a DiskInfo> {
         match self {
             Self::Number(n) => disks.iter().find(|d| d.number == *n).ok_or_else(|| {
                 let available = disks.iter().map(|d| d.number.to_string()).collect::<Vec<_>>().join(", ");
-                anyhow::anyhow!("disco {n} não encontrado. Discos disponíveis: {available} (veja `diskdoctor list`)")
+                anyhow::anyhow!(tr!(
+                    "drive {n} not found. Available drives: {available} (see `diskdoctor list`)",
+                    "disco {n} não encontrado. Discos disponíveis: {available} (veja `diskdoctor list`)"
+                ))
             }),
             Self::Tag(tag) => {
                 let matches: Vec<&DiskInfo> = disks.iter().filter(|d| d.tags.iter().any(|t| same_tag(t, tag))).collect();
@@ -237,16 +258,26 @@ impl DiskRef {
                     [] => {
                         let known: Vec<String> = disks
                             .iter()
-                            .flat_map(|d| d.tags.iter().map(move |t| format!("{t} (disco {})", d.number)))
+                            .flat_map(|d| d.tags.iter().map(move |t| tr!("{t} (drive {})", "{t} (disco {})", d.number)))
                             .collect();
                         if known.is_empty() {
-                            bail!("nenhum disco tem a tag \"{tag}\" (nenhuma tag definida). Crie com `diskdoctor tag add --disk N {tag}`")
+                            bail!(tr!(
+                                "no drive has the tag \"{tag}\" (no tags defined). Create it with `diskdoctor tag add --disk N {tag}`",
+                                "nenhum disco tem a tag \"{tag}\" (nenhuma tag definida). Crie com `diskdoctor tag add --disk N {tag}`"
+                            ))
                         }
-                        bail!("nenhum disco conectado tem a tag \"{tag}\". Tags existentes: {}", known.join(", "))
+                        bail!(tr!(
+                            "no connected drive has the tag \"{tag}\". Existing tags: {}",
+                            "nenhum disco conectado tem a tag \"{tag}\". Tags existentes: {}",
+                            known.join(", ")
+                        ))
                     }
                     many => {
                         let numbers = many.iter().map(|d| d.number.to_string()).collect::<Vec<_>>().join(", ");
-                        bail!("a tag \"{tag}\" está em mais de um disco ({numbers}). Use o número do disco ou uma tag exclusiva")
+                        bail!(tr!(
+                            "the tag \"{tag}\" is on more than one drive ({numbers}). Use the drive number or a unique tag",
+                            "a tag \"{tag}\" está em mais de um disco ({numbers}). Use o número do disco ou uma tag exclusiva"
+                        ))
                     }
                 }
             }
@@ -254,7 +285,7 @@ impl DiskRef {
     }
 }
 
-/// Tag pronta para colar na linha de comando (entre aspas quando tem espaço).
+/// Tag ready to paste on the command line (quoted when it has a space).
 pub fn quote_for_cli(tag: &str) -> String {
     if tag.contains(' ') { format!("\"{tag}\"") } else { tag.to_string() }
 }
@@ -271,14 +302,14 @@ mod tests {
     #[test]
     fn normalizes_and_validates_tags() {
         assert_eq!(normalize_tag("  Studio  ").unwrap(), "Studio");
-        assert_eq!(normalize_tag("HD   externo").unwrap(), "HD externo");
+        assert_eq!(normalize_tag("External   HDD").unwrap(), "External HDD");
         assert_eq!(normalize_tag("Músicas_2024.v2").unwrap(), "Músicas_2024.v2");
         assert_eq!(normalize_tag("Win-11").unwrap(), "Win-11");
         assert!(normalize_tag("   ").is_err());
-        assert!(normalize_tag("2").is_err(), "só dígitos confundiria com o número do disco");
+        assert!(normalize_tag("2").is_err(), "digits only would be mistaken for the drive number");
         assert!(normalize_tag("-x").is_err());
         assert!(normalize_tag("a,b").is_err());
-        assert!(normalize_tag("jogos/steam").is_err());
+        assert!(normalize_tag("games/steam").is_err());
         assert!(normalize_tag(&"x".repeat(MAX_TAG_CHARS)).is_ok());
         assert!(normalize_tag(&"x".repeat(MAX_TAG_CHARS + 1)).is_err());
     }
@@ -289,7 +320,7 @@ mod tests {
         let d2 = &disks[2];
         let mut book = TagBook::default();
         assert_eq!(book.add(d2, &tags(&["studio", "Windows"])).unwrap(), tags(&["studio", "Windows"]));
-        // Mesma tag com outra grafia: não duplica, só corrige a grafia.
+        // Same tag with another spelling: no duplicate, only the spelling changes.
         assert_eq!(book.add(d2, &tags(&["Studio", "STUDIO"])).unwrap(), Vec::<String>::new());
         assert_eq!(book.tags_for(&d2.fingerprint), tags(&["STUDIO", "Windows"]).as_slice());
         assert_eq!(book.disks[&d2.fingerprint].model, d2.model);
@@ -311,19 +342,19 @@ mod tests {
         let disks = fixture_disks();
         let fp = disks[1].fingerprint.clone();
         let mut book = TagBook::default();
-        book.add(&disks[1], &tags(&["Jogos", "Windows"])).unwrap();
-        assert_eq!(book.remove(&fp, &tags(&["windows", "inexistente"])), tags(&["Windows"]));
-        assert_eq!(book.tags_for(&fp), tags(&["Jogos"]).as_slice());
-        assert_eq!(book.clear(&fp), tags(&["Jogos"]));
+        book.add(&disks[1], &tags(&["Games", "Windows"])).unwrap();
+        assert_eq!(book.remove(&fp, &tags(&["windows", "missing"])), tags(&["Windows"]));
+        assert_eq!(book.tags_for(&fp), tags(&["Games"]).as_slice());
+        assert_eq!(book.clear(&fp), tags(&["Games"]));
         assert!(!book.disks.contains_key(&fp));
-        assert!(book.remove(&fp, &tags(&["Jogos"])).is_empty());
+        assert!(book.remove(&fp, &tags(&["Games"])).is_empty());
     }
 
     #[test]
     fn store_round_trip_and_missing_or_corrupt_file() {
         let dir = tempfile::tempdir().unwrap();
         let store = TagStore::new(dir.path());
-        assert_eq!(store.load().unwrap(), TagBook::default(), "sem arquivo = sem tags");
+        assert_eq!(store.load().unwrap(), TagBook::default(), "no file = no tags");
 
         let disks = fixture_disks();
         let mut book = TagBook::default();
@@ -332,9 +363,10 @@ mod tests {
         assert_eq!(store.load().unwrap(), book);
         assert!(!store.path().with_extension("json.tmp").exists());
 
-        fs::write(store.path(), "{ quebrado").unwrap();
+        fs::write(store.path(), "{ broken").unwrap();
+        let _en = crate::i18n::scoped(crate::i18n::Lang::En);
         let err = format!("{:#}", store.load().unwrap_err());
-        assert!(err.contains("corrompido"), "{err}");
+        assert!(err.contains("corrupted"), "{err}");
     }
 
     #[test]
@@ -349,32 +381,36 @@ mod tests {
 
     #[test]
     fn resolves_disks_by_number_or_unique_tag() {
+        let _en = crate::i18n::scoped(crate::i18n::Lang::En);
         let mut disks = fixture_disks();
         let mut book = TagBook::default();
         book.add(&disks[2], &tags(&["Studio", "Windows"])).unwrap();
-        book.add(&disks[1], &tags(&["Jogos", "Windows"])).unwrap();
+        book.add(&disks[1], &tags(&["Games", "Windows"])).unwrap();
         book.apply(&mut disks);
 
         assert_eq!(DiskRef::Number(0).resolve(&disks).unwrap().number, 0);
         assert_eq!(DiskRef::Tag("studio".into()).resolve(&disks).unwrap().number, 2);
-        assert_eq!(DiskRef::Tag("JOGOS".into()).resolve(&disks).unwrap().number, 1);
+        assert_eq!(DiskRef::Tag("GAMES".into()).resolve(&disks).unwrap().number, 1);
 
         let missing = DiskRef::Number(7).resolve(&disks).unwrap_err().to_string();
         assert!(missing.contains("0, 1, 2"), "{missing}");
         let unknown = DiskRef::Tag("Backup".into()).resolve(&disks).unwrap_err().to_string();
-        assert!(unknown.contains("Studio (disco 2)"), "{unknown}");
+        assert!(unknown.contains("Studio (drive 2)"), "{unknown}");
         let ambiguous = DiskRef::Tag("windows".into()).resolve(&disks).unwrap_err().to_string();
-        assert!(ambiguous.contains("mais de um disco (1, 2)"), "{ambiguous}");
+        assert!(ambiguous.contains("more than one drive (1, 2)"), "{ambiguous}");
     }
 
     #[test]
     fn titles_show_tags() {
+        let _en = crate::i18n::scoped(crate::i18n::Lang::En);
         let mut disks = fixture_disks();
         let mut book = TagBook::default();
         book.add(&disks[2], &tags(&["Studio"])).unwrap();
         book.apply(&mut disks);
-        assert_eq!(disks[2].title(), "Disco 2 [Studio] · KINGSTON SA400S37120G");
+        assert_eq!(disks[2].title(), "Drive 2 [Studio] · KINGSTON SA400S37120G");
         assert_eq!(disks[2].identity().title(), disks[2].title());
         assert!(!disks[0].title().contains('['));
+        let _pt = crate::i18n::scoped(crate::i18n::Lang::PtBr);
+        assert_eq!(disks[2].title(), "Disco 2 [Studio] · KINGSTON SA400S37120G");
     }
 }

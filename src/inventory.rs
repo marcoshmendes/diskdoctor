@@ -1,11 +1,12 @@
-//! Inventário de discos físicos via PowerShell/CIM (`Get-Disk`, `Get-PhysicalDisk`,
-//! `Get-Partition`, `Get-Volume`).
+//! Physical drive inventory through PowerShell/CIM (`Get-Disk`, `Get-PhysicalDisk`,
+//! `Win32_DiskDrive`, `Get-Partition`, `Get-Volume`).
 //!
-//! O script projeta cada propriedade com cast explícito (`[string]`, `[uint64]`)
-//! para o JSON ter formato previsível no PowerShell 5.1. Enums (BusType,
-//! MediaType) podem vir como nome ("SATA") ou número ("11") dependendo do
-//! ambiente; os parsers aceitam os dois.
+//! The script projects every property with an explicit cast (`[string]`, `[uint64]`) so
+//! the JSON has a predictable shape on PowerShell 5.1. Enums (BusType, MediaType) may come
+//! as a name ("SATA") or a number ("11") depending on the environment; the parsers accept
+//! both.
 
+use crate::i18n::{is_pt, t};
 use crate::platform;
 use crate::util::{fingerprint, mask_serial};
 use anyhow::{Context, Result};
@@ -22,7 +23,7 @@ pub enum BusKind {
     Scsi,
     Ata,
     Raid,
-    /// Leitor de cartão SD ligado direto ao barramento (notebooks).
+    /// SD card reader attached directly to the bus (laptops).
     Sd,
     Mmc,
     /// FireWire.
@@ -44,7 +45,13 @@ impl BusKind {
             "sd" | "12" => Self::Sd,
             "mmc" | "13" => Self::Mmc,
             "1394" | "4" => Self::Ieee1394,
-            "virtual" | "14" | "file backed virtual" | "15" | "storage spaces" | "spaces" | "16" => Self::Virtual,
+            "virtual"
+            | "14"
+            | "file backed virtual"
+            | "15"
+            | "storage spaces"
+            | "spaces"
+            | "16" => Self::Virtual,
             _ => Self::Other,
         }
     }
@@ -62,27 +69,27 @@ impl BusKind {
             Self::Mmc => "MMC",
             Self::Ieee1394 => "FireWire",
             Self::Virtual => "Virtual",
-            Self::Other => "Outro",
+            Self::Other => t("Other", "Outro"),
         }
     }
 
-    /// Barramentos de dispositivos que se conectam por fora do gabinete.
+    /// Buses of devices that connect from outside the case.
     pub fn is_external_bus(&self) -> bool {
         matches!(self, Self::Usb | Self::Sd | Self::Mmc | Self::Ieee1394)
     }
 }
 
-/// Forma do dispositivo, do ponto de vista do usuário.
+/// Form of the device, from the user's point of view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceKind {
-    /// Disco interno (SATA, NVMe, SAS…).
+    /// Internal drive (SATA, NVMe, SAS…).
     Internal,
-    /// HD ou SSD externo (case/gaveta USB, disco portátil).
+    /// External HDD or SSD (USB enclosure, portable drive).
     ExternalDrive,
-    /// Pendrive (mídia removível USB).
+    /// USB flash drive (USB removable media).
     FlashDrive,
-    /// Cartão SD/microSD/CF em leitor interno ou USB.
+    /// SD/microSD/CF card in an internal or USB reader.
     MemoryCard,
 }
 
@@ -90,13 +97,15 @@ static RE_CARD_MODEL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::n
     regex::Regex::new(r"(?i)\b(sd|sdhc|sdxc|micro ?sd|mmc|card|reader|cf|compact ?flash|ms ?pro|memory ?stick|xd)\b").expect("regex")
 });
 
-/// Classifica o dispositivo a partir do barramento, do `Win32_DiskDrive.MediaType`
-/// ("Fixed hard disk media", "External hard disk media", "Removable Media") e do modelo.
+/// Classifies the device from the bus, `Win32_DiskDrive.MediaType` ("Fixed hard disk
+/// media", "External hard disk media", "Removable Media") and the model.
 pub fn infer_device_kind(bus: BusKind, drive_media_type: Option<&str>, model: &str) -> DeviceKind {
     let media = drive_media_type.unwrap_or_default().to_ascii_lowercase();
     let removable = media.contains("removable");
     let external = media.contains("external");
-    if matches!(bus, BusKind::Sd | BusKind::Mmc) || ((removable || bus == BusKind::Usb) && RE_CARD_MODEL.is_match(model)) {
+    if matches!(bus, BusKind::Sd | BusKind::Mmc)
+        || ((removable || bus == BusKind::Usb) && RE_CARD_MODEL.is_match(model))
+    {
         return DeviceKind::MemoryCard;
     }
     if removable {
@@ -116,8 +125,13 @@ pub enum MediaKind {
     Unknown,
 }
 
-/// Deduz o tipo de mídia (HDD/SSD) a partir do que o Windows informa e de heurísticas.
-pub fn infer_media(raw_media: Option<&str>, bus: BusKind, spindle_rpm: Option<u32>, model: &str) -> MediaKind {
+/// Infers the media type (HDD/SSD) from what Windows reports and from heuristics.
+pub fn infer_media(
+    raw_media: Option<&str>,
+    bus: BusKind,
+    spindle_rpm: Option<u32>,
+    model: &str,
+) -> MediaKind {
     match raw_media.map(|s| s.trim().to_ascii_uppercase()).as_deref() {
         Some("SSD" | "4" | "SCM" | "5") => return MediaKind::Ssd,
         Some("HDD" | "3") => return MediaKind::Hdd,
@@ -152,25 +166,25 @@ pub struct PartitionInfo {
     pub label: Option<String>,
     pub volume_size: Option<u64>,
     pub volume_free: Option<u64>,
-    /// Caminhos `\\?\Volume{guid}\` (como aparecem em eventos NTFS).
+    /// `\\?\Volume{guid}\` paths (as they appear in NTFS events).
     pub volume_paths: Vec<String>,
-    /// `\Device\HarddiskVolumeN` resolvido via `QueryDosDevice`.
+    /// `\Device\HarddiskVolumeN` resolved with `QueryDosDevice`.
     pub device_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DiskInfo {
-    /// Número do disco no Windows (= N de `\\.\PhysicalDriveN`).
+    /// Windows drive number (= N of `\\.\PhysicalDriveN`).
     pub number: u32,
     pub model: String,
     pub serial_masked: String,
-    /// Hash do modelo+serial, para correlacionar execuções sem expor o serial.
+    /// Hash of model+serial, to link runs without exposing the serial.
     pub fingerprint: String,
     pub size_bytes: u64,
     pub bus: BusKind,
     pub bus_raw: String,
     pub media: MediaKind,
-    /// Interno, externo, pendrive ou cartão.
+    /// Internal, external, USB flash drive or memory card.
     #[serde(default = "default_kind")]
     pub kind: DeviceKind,
     pub firmware: Option<String>,
@@ -186,13 +200,13 @@ pub struct DiskInfo {
     pub location: Option<String>,
     pub spindle_rpm: Option<u32>,
     pub partitions: Vec<PartitionInfo>,
-    /// Tags do usuário ("Studio", "Jogos"…), preenchidas a partir de `tags.json`
-    /// (`tags::TagBook::apply`); vazio logo após o inventário.
+    /// User tags ("Studio", "Games"…), filled from `tags.json` (`tags::TagBook::apply`);
+    /// empty right after the inventory.
     #[serde(default)]
     pub tags: Vec<String>,
 }
 
-/// Identidade resumida do disco, gravada junto com resultados de testes.
+/// Short identity of the drive, saved together with test results.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DiskIdentity {
     pub number: u32,
@@ -201,14 +215,20 @@ pub struct DiskIdentity {
     pub fingerprint: String,
     pub size_bytes: u64,
     pub class_label: String,
-    /// Tags do disco na hora do teste (atualizadas pelo `report` com as tags atuais).
+    /// Tags at test time (refreshed with the current tags by `report`).
     #[serde(default)]
     pub tags: Vec<String>,
 }
 
-/// "Disco 2 · KINGSTON SA400S37120G" ou, com tags, "Disco 2 [Studio, Windows] · KINGSTON SA400S37120G".
+/// "Drive 2 · KINGSTON SA400S37120G" or, with tags, "Drive 2 [Studio, Windows] · KINGSTON SA400S37120G"
+/// ("Disco 2 …" in pt-BR).
 pub fn disk_title(number: u32, model: &str, tags: &[String]) -> String {
-    if tags.is_empty() { format!("Disco {number} · {model}") } else { format!("Disco {number} [{}] · {model}", tags.join(", ")) }
+    let drive = t("Drive", "Disco");
+    if tags.is_empty() {
+        format!("{drive} {number} · {model}")
+    } else {
+        format!("{drive} {number} [{}] · {model}", tags.join(", "))
+    }
 }
 
 impl DiskIdentity {
@@ -230,7 +250,7 @@ impl DiskInfo {
         self.media == MediaKind::Hdd
     }
 
-    /// Pendrive ou cartão de memória: não têm SMART e são o alvo típico de capacidade falsa.
+    /// USB flash drive or memory card: no SMART, and the typical target of fake capacity.
     pub fn is_flash_media(&self) -> bool {
         matches!(self.kind, DeviceKind::FlashDrive | DeviceKind::MemoryCard)
     }
@@ -239,24 +259,39 @@ impl DiskInfo {
         self.kind != DeviceKind::Internal
     }
 
-    /// "SSD NVMe", "SSD SATA", "HD SATA", "HD externo USB", "Pendrive USB", "Cartão de memória"...
+    /// "NVMe SSD", "SATA HDD", "External USB SSD", "USB flash drive", "Memory card"… in
+    /// English; "SSD NVMe", "HD SATA", "SSD externo USB", "Pendrive USB", "Cartão de memória"…
+    /// in pt-BR.
     pub fn class_label(&self) -> String {
-        let media = match self.media {
-            MediaKind::Ssd => "SSD",
-            MediaKind::Hdd => "HD",
-            MediaKind::Unknown if self.bus == BusKind::Nvme => "SSD",
-            MediaKind::Unknown => "Disco",
+        let bus = self.bus.label();
+        let ssd = self.media == MediaKind::Ssd || (self.media == MediaKind::Unknown && self.bus == BusKind::Nvme);
+        let media = match (ssd, self.media) {
+            (true, _) => "SSD",
+            (false, MediaKind::Hdd) => t("HDD", "HD"),
+            _ => t("drive", "Disco"),
         };
-        match self.kind {
-            DeviceKind::MemoryCard => "Cartão de memória".into(),
-            DeviceKind::FlashDrive => format!("Pendrive {}", self.bus.label()),
-            DeviceKind::ExternalDrive => format!("{media} externo {}", self.bus.label()),
-            DeviceKind::Internal => format!("{media} {}", self.bus.label()),
+        if is_pt() {
+            match self.kind {
+                DeviceKind::MemoryCard => "Cartão de memória".into(),
+                DeviceKind::FlashDrive => format!("Pendrive {bus}"),
+                DeviceKind::ExternalDrive => format!("{media} externo {bus}"),
+                DeviceKind::Internal => format!("{media} {bus}"),
+            }
+        } else {
+            match self.kind {
+                DeviceKind::MemoryCard => "Memory card".into(),
+                DeviceKind::FlashDrive => format!("{bus} flash drive"),
+                DeviceKind::ExternalDrive => format!("External {bus} {media}"),
+                DeviceKind::Internal => format!("{bus} {media}"),
+            }
         }
     }
 
     pub fn volume_letters(&self) -> Vec<String> {
-        self.partitions.iter().filter_map(|p| p.drive_letter.as_ref().map(|l| format!("{l}:"))).collect()
+        self.partitions
+            .iter()
+            .filter_map(|p| p.drive_letter.as_ref().map(|l| format!("{l}:")))
+            .collect()
     }
 
     pub fn identity(&self) -> DiskIdentity {
@@ -271,7 +306,7 @@ impl DiskInfo {
         }
     }
 
-    /// Nome curto para cabeçalhos: "Disco 2 [Studio] · KINGSTON SA400S37120G".
+    /// Short name for headings: "Drive 2 [Studio] · KINGSTON SA400S37120G".
     pub fn title(&self) -> String {
         disk_title(self.number, &self.model, &self.tags)
     }
@@ -283,35 +318,45 @@ pub fn find_disk(disks: &[DiskInfo], number: u32) -> Option<&DiskInfo> {
 
 fn partition_matches(p: &PartitionInfo, lower: &str) -> bool {
     let guid_match = p.volume_paths.iter().any(|vp| {
-        let key = vp.trim_start_matches(r"\\?\").trim_end_matches('\\').to_ascii_lowercase();
+        let key = vp
+            .trim_start_matches(r"\\?\")
+            .trim_end_matches('\\')
+            .to_ascii_lowercase();
         key.starts_with("volume{") && lower.contains(&key)
     });
     let device_match = p.device_path.as_ref().is_some_and(|dp| {
         let dp = dp.to_ascii_lowercase();
-        // Evita que HarddiskVolume1 case com HarddiskVolume10.
-        lower.match_indices(&dp).any(|(i, _)| !lower[i + dp.len()..].starts_with(|c: char| c.is_ascii_digit()))
+        // Keeps HarddiskVolume1 from matching HarddiskVolume10.
+        lower
+            .match_indices(&dp)
+            .any(|(i, _)| !lower[i + dp.len()..].starts_with(|c: char| c.is_ascii_digit()))
     });
     guid_match || device_match
 }
 
-/// Partição deste disco citada em `text` (`Volume{guid}` ou `\Device\HarddiskVolumeN`).
+/// Partition of this drive cited in `text` (`Volume{guid}` or `\Device\HarddiskVolumeN`).
 pub fn partition_for_reference<'a>(disk: &'a DiskInfo, text: &str) -> Option<&'a PartitionInfo> {
     let lower = text.to_ascii_lowercase();
-    disk.partitions.iter().find(|p| partition_matches(p, &lower))
+    disk.partitions
+        .iter()
+        .find(|p| partition_matches(p, &lower))
 }
 
-/// Disco que contém o volume citado em `text` (`Volume{guid}` ou `\Device\HarddiskVolumeN`).
+/// Drive holding the volume cited in `text` (`Volume{guid}` or `\Device\HarddiskVolumeN`).
 pub fn disk_for_volume_reference(disks: &[DiskInfo], text: &str) -> Option<u32> {
-    disks.iter().find(|d| partition_for_reference(d, text).is_some()).map(|d| d.number)
+    disks
+        .iter()
+        .find(|d| partition_for_reference(d, text).is_some())
+        .map(|d| d.number)
 }
 
 impl PartitionInfo {
-    /// "C:" ou "partição 4 sem letra (Recovery)".
+    /// "C:" or "partition 4 without letter (Recovery)".
     pub fn display_name(&self) -> String {
         match &self.drive_letter {
             Some(l) => format!("{l}:"),
-            None if self.kind.is_empty() => format!("partição {} sem letra", self.number),
-            None => format!("partição {} sem letra ({})", self.number, self.kind),
+            None if self.kind.is_empty() => tr!("partition {} without letter", "partição {} sem letra", self.number),
+            None => tr!("partition {} without letter ({})", "partição {} sem letra ({})", self.number, self.kind),
         }
     }
 }
@@ -320,12 +365,19 @@ pub fn disk_for_letter(disks: &[DiskInfo], letter: &str) -> Option<u32> {
     let letter = letter.trim().trim_end_matches(':').to_ascii_uppercase();
     disks
         .iter()
-        .find(|d| d.partitions.iter().any(|p| p.drive_letter.as_deref().map(|l| l.eq_ignore_ascii_case(&letter)).unwrap_or(false)))
+        .find(|d| {
+            d.partitions.iter().any(|p| {
+                p.drive_letter
+                    .as_deref()
+                    .map(|l| l.eq_ignore_ascii_case(&letter))
+                    .unwrap_or(false)
+            })
+        })
         .map(|d| d.number)
 }
 
 // ---------------------------------------------------------------------------
-// Coleta via PowerShell
+// Collection through PowerShell
 // ---------------------------------------------------------------------------
 
 const INVENTORY_SCRIPT: &str = r#"
@@ -446,31 +498,38 @@ fn non_empty(s: Option<String>) -> Option<String> {
     s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
 
-/// Converte o JSON do script de inventário em [`DiskInfo`] (sem resolver dispositivos de volume).
+/// Converts the inventory script JSON into [`DiskInfo`] (without resolving volume devices).
 pub fn parse_inventory_json(json: &str) -> Result<Vec<DiskInfo>> {
     let json = json.trim();
     if json.is_empty() {
         return Ok(vec![]);
     }
-    let raw: Vec<RawDisk> = serde_json::from_str(json).context("JSON de inventário inválido")?;
+    let raw: Vec<RawDisk> = serde_json::from_str(json).context(t("invalid inventory JSON", "JSON de inventário inválido"))?;
     let mut disks: Vec<DiskInfo> = raw
         .into_iter()
         .map(|d| {
-            let model = non_empty(d.model).or(non_empty(d.friendly_name)).unwrap_or_else(|| "(modelo desconhecido)".into());
+            let model = non_empty(d.model)
+                .or(non_empty(d.friendly_name))
+                .unwrap_or_else(|| t("(unknown model)", "(modelo desconhecido)").into());
             let serial = d.serial_number.unwrap_or_default();
             let bus_raw = d.bus_type.unwrap_or_default();
             let bus = BusKind::parse(&bus_raw);
             let spindle_rpm = d.spindle_speed.filter(|&s| s != u32::MAX);
             let media = infer_media(d.media_type.as_deref(), bus, spindle_rpm, &model);
             let kind = infer_device_kind(bus, d.drive_media_type.as_deref(), &model);
-            let fp_source = if serial.trim().is_empty() { format!("{model}|{}", d.size) } else { format!("{model}|{}", serial.trim()) };
+            let fp_source = if serial.trim().is_empty() {
+                format!("{model}|{}", d.size)
+            } else {
+                format!("{model}|{}", serial.trim())
+            };
             let partitions = d
                 .partitions
                 .unwrap_or_default()
                 .into_iter()
                 .map(|p| PartitionInfo {
                     number: p.partition_number,
-                    drive_letter: non_empty(p.drive_letter).filter(|l| l.chars().all(|c| c.is_ascii_alphabetic())),
+                    drive_letter: non_empty(p.drive_letter)
+                        .filter(|l| l.chars().all(|c| c.is_ascii_alphabetic())),
                     offset: p.offset,
                     size: p.size,
                     kind: p.kind.unwrap_or_default(),
@@ -480,7 +539,12 @@ pub fn parse_inventory_json(json: &str) -> Result<Vec<DiskInfo>> {
                     label: non_empty(p.label),
                     volume_size: p.volume_size,
                     volume_free: p.volume_free,
-                    volume_paths: p.access_paths.unwrap_or_default().into_iter().filter(|a| a.starts_with(r"\\?\Volume")).collect(),
+                    volume_paths: p
+                        .access_paths
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|a| a.starts_with(r"\\?\Volume"))
+                        .collect(),
                     device_path: None,
                 })
                 .collect();
@@ -515,14 +579,17 @@ pub fn parse_inventory_json(json: &str) -> Result<Vec<DiskInfo>> {
     Ok(disks)
 }
 
-/// Coleta o inventário real (Windows).
+/// Collects the real inventory (Windows).
 pub fn load_inventory() -> Result<Vec<DiskInfo>> {
     let json = platform::powershell::run_script(INVENTORY_SCRIPT, Duration::from_secs(90))
-        .context("falha ao listar discos via PowerShell (Get-Disk)")?;
+        .context(t("failed to list drives through PowerShell (Get-Disk)", "falha ao listar discos via PowerShell (Get-Disk)"))?;
     let mut disks = parse_inventory_json(&json)?;
     for disk in &mut disks {
         for p in &mut disk.partitions {
-            p.device_path = p.volume_paths.iter().find_map(|vp| platform::resolve_volume_device(vp));
+            p.device_path = p
+                .volume_paths
+                .iter()
+                .find_map(|vp| platform::resolve_volume_device(vp));
         }
     }
     Ok(disks)
@@ -532,12 +599,12 @@ pub fn load_inventory() -> Result<Vec<DiskInfo>> {
 pub(crate) mod tests {
     use super::*;
 
-    /// Inventário real anonimizado (3 SSDs SATA) usado também por outros testes.
+    /// Real, anonymized inventory (3 SATA SSDs), also used by other tests.
     pub const FIXTURE: &str = include_str!("../tests/fixtures/inventory.json");
 
     pub fn fixture_disks() -> Vec<DiskInfo> {
         let mut disks = parse_inventory_json(FIXTURE).unwrap();
-        // Simula a resolução feita por QueryDosDevice.
+        // Simulates the resolution done by QueryDosDevice.
         for d in &mut disks {
             for p in &mut d.partitions {
                 if p.volume_paths.iter().any(|v| v.contains("000000000104")) {
@@ -550,14 +617,18 @@ pub(crate) mod tests {
 
     #[test]
     fn parses_fixture_inventory() {
+        let _en = crate::i18n::scoped(crate::i18n::Lang::En);
         let disks = fixture_disks();
         assert_eq!(disks.len(), 3);
-        assert_eq!(disks.iter().map(|d| d.number).collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert_eq!(
+            disks.iter().map(|d| d.number).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
         let d2 = find_disk(&disks, 2).unwrap();
         assert_eq!(d2.model, "KINGSTON SA400S37120G");
         assert_eq!(d2.bus, BusKind::Sata);
         assert_eq!(d2.media, MediaKind::Ssd);
-        assert_eq!(d2.class_label(), "SSD SATA");
+        assert_eq!(d2.class_label(), "SATA SSD");
         assert!(d2.is_boot);
         assert_eq!(d2.volume_letters(), vec!["C:"]);
         assert!(!d2.serial_masked.is_empty());
@@ -566,11 +637,12 @@ pub(crate) mod tests {
 
     #[test]
     fn accepts_numeric_enums() {
+        let _en = crate::i18n::scoped(crate::i18n::Lang::En);
         let json = r#"[{"Number":3,"Model":"X NVMe","SerialNumber":"ABCDEFGHIJ","Size":1000,"BusType":"17","MediaType":"0","Partitions":[]}]"#;
         let disks = parse_inventory_json(json).unwrap();
         assert_eq!(disks[0].bus, BusKind::Nvme);
         assert_eq!(disks[0].media, MediaKind::Ssd);
-        assert_eq!(disks[0].class_label(), "SSD NVMe");
+        assert_eq!(disks[0].class_label(), "NVMe SSD");
     }
 
     #[test]
@@ -584,25 +656,62 @@ pub(crate) mod tests {
         ]"#;
         let disks = parse_inventory_json(json).unwrap();
         let label = |n: u32| find_disk(&disks, n).unwrap().class_label();
-        assert_eq!(label(3), "Disco externo USB");
-        assert_eq!(label(4), "Pendrive USB");
-        assert_eq!(label(5), "Cartão de memória");
-        assert_eq!(label(6), "Cartão de memória");
-        assert_eq!(label(7), "SSD externo USB");
+        {
+            let _en = crate::i18n::scoped(crate::i18n::Lang::En);
+            assert_eq!(label(3), "External USB drive");
+            assert_eq!(label(4), "USB flash drive");
+            assert_eq!(label(5), "Memory card");
+            assert_eq!(label(6), "Memory card");
+            assert_eq!(label(7), "External USB SSD");
+            assert_eq!(find_disk(&fixture_disks(), 2).unwrap().class_label(), "SATA SSD");
+        }
+        {
+            let _pt = crate::i18n::scoped(crate::i18n::Lang::PtBr);
+            assert_eq!(label(3), "Disco externo USB");
+            assert_eq!(label(4), "Pendrive USB");
+            assert_eq!(label(5), "Cartão de memória");
+            assert_eq!(label(7), "SSD externo USB");
+            assert_eq!(find_disk(&fixture_disks(), 2).unwrap().class_label(), "SSD SATA");
+        }
         assert!(find_disk(&disks, 4).unwrap().is_flash_media());
         assert!(!find_disk(&disks, 7).unwrap().is_flash_media());
         assert!(find_disk(&disks, 7).unwrap().is_external());
-        // Discos internos continuam como antes (fixture real não tem DriveMediaType).
-        assert!(fixture_disks().iter().all(|d| d.kind == DeviceKind::Internal));
-        // "SSD" não pode ser confundido com cartão "SD".
-        assert_eq!(infer_device_kind(BusKind::Usb, Some("External hard disk media"), "Crucial X6 SSD"), DeviceKind::ExternalDrive);
+        // Internal drives stay as before (the real fixture has no DriveMediaType).
+        assert!(
+            fixture_disks()
+                .iter()
+                .all(|d| d.kind == DeviceKind::Internal)
+        );
+        // "SSD" must not be mistaken for an "SD" card.
+        assert_eq!(
+            infer_device_kind(
+                BusKind::Usb,
+                Some("External hard disk media"),
+                "Crucial X6 SSD"
+            ),
+            DeviceKind::ExternalDrive
+        );
     }
 
     #[test]
     fn infers_hdd_from_spindle() {
-        assert_eq!(infer_media(Some("Unspecified"), BusKind::Sata, Some(7200), "ST2000DM008"), MediaKind::Hdd);
-        assert_eq!(infer_media(None, BusKind::Sata, Some(u32::MAX), "ST2000DM008"), MediaKind::Unknown);
-        assert_eq!(infer_media(Some("3"), BusKind::Sata, None, "x"), MediaKind::Hdd);
+        assert_eq!(
+            infer_media(
+                Some("Unspecified"),
+                BusKind::Sata,
+                Some(7200),
+                "ST2000DM008"
+            ),
+            MediaKind::Hdd
+        );
+        assert_eq!(
+            infer_media(None, BusKind::Sata, Some(u32::MAX), "ST2000DM008"),
+            MediaKind::Unknown
+        );
+        assert_eq!(
+            infer_media(Some("3"), BusKind::Sata, None, "x"),
+            MediaKind::Hdd
+        );
     }
 
     #[test]
@@ -611,10 +720,22 @@ pub(crate) mod tests {
         assert_eq!(disk_for_letter(&disks, "C:"), Some(2));
         assert_eq!(disk_for_letter(&disks, "e"), Some(0));
         assert_eq!(disk_for_letter(&disks, "Z:"), None);
-        assert_eq!(disk_for_volume_reference(&disks, r"Volume \\?\Volume{00000000-0000-4000-8000-000000000104} precisa"), Some(1));
-        assert_eq!(disk_for_volume_reference(&disks, r"(\Device\HarddiskVolume5)"), Some(1));
-        assert_eq!(disk_for_volume_reference(&disks, r"(\Device\HarddiskVolume55)"), None);
-        assert_eq!(disk_for_volume_reference(&disks, "nada aqui"), None);
+        assert_eq!(
+            disk_for_volume_reference(
+                &disks,
+                r"Volume \\?\Volume{00000000-0000-4000-8000-000000000104} needs repair"
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            disk_for_volume_reference(&disks, r"(\Device\HarddiskVolume5)"),
+            Some(1)
+        );
+        assert_eq!(
+            disk_for_volume_reference(&disks, r"(\Device\HarddiskVolume55)"),
+            None
+        );
+        assert_eq!(disk_for_volume_reference(&disks, "nothing here"), None);
     }
 
     #[test]
